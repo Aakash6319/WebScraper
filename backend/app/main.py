@@ -157,6 +157,59 @@ async def health_check():
     }
 
 
+@app.get("/api/v1/debug/inspect")
+async def debug_inspect():
+    from app.features.sessions.service import SessionService
+    contexts = SessionService._active_contexts
+    res = {}
+    for sid, context in list(contexts.items()):
+        pages = context.pages if hasattr(context, "pages") else []
+        res[sid] = {
+            "pages_count": len(pages),
+            "pages": []
+        }
+        for page in pages:
+            try:
+                grec_cfg = await page.evaluate("""
+                    () => {
+                        if (typeof ___grecaptcha_cfg === 'undefined') return 'undefined';
+                        const dumpObj = (obj, depth = 0) => {
+                            if (depth > 6 || !obj || typeof obj !== 'object') return typeof obj;
+                            const res = {};
+                            for (const key in obj) {
+                                try {
+                                    const val = obj[key];
+                                    if (typeof val === 'function') {
+                                        res[key] = 'function';
+                                    } else if (typeof val === 'object') {
+                                        res[key] = dumpObj(val, depth + 1);
+                                    } else {
+                                        res[key] = val;
+                                    }
+                                } catch(e) {
+                                    res[key] = 'error';
+                                }
+                            }
+                            return res;
+                        };
+                        return {
+                            keys: Object.keys(___grecaptcha_cfg),
+                            clients: dumpObj(___grecaptcha_cfg.clients)
+                        };
+                    }
+                """)
+                res[sid]["pages"].append({
+                    "url": page.url,
+                    "grecaptcha_cfg": grec_cfg
+                })
+            except Exception as e:
+                res[sid]["pages"].append({
+                    "url": page.url,
+                    "error": str(e)
+                })
+    return res
+
+
 @app.get("/api/v1/health", tags=["Health"])
 async def api_health_check():
     """API health check with DB status."""

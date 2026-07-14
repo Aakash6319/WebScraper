@@ -157,7 +157,7 @@ class AgentService:
 
             screenshot_bg_task = asyncio.create_task(screenshot_worker())
 
-            max_steps = 30
+            max_steps = 50
             step_idx = 0
             completed = False
 
@@ -528,7 +528,7 @@ class AgentService:
 
             logger.success(
                 f"✅ Task {task_id} completed in {task.duration_ms}ms "
-                f"({len(plan)} steps)"
+                f"({step_idx} steps)"
             )
 
         except Exception as e:

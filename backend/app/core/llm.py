@@ -169,12 +169,16 @@ OUTPUT FORMAT (JSON object only, no markdown):
 CRITICAL RULES:
 - If the goal has been fully accomplished (e.g. job application successfully submitted, or confirmation message shown), return action "complete" with description "Goal fully achieved".
 - DO NOT repeat the same failed actions unless you change parameters or element targets. If a step failed, try an alternative element or path.
+- COOKIES & POPUPS: If you see cookie consent popups (e.g. "LinkedIn respects your privacy", "Accept", "Reject", "Accept Cookies") or active filter overlays blocking your view, you MUST close/accept/dismiss them FIRST (e.g. click "Accept", "Reject", or the close "X" button) before attempting to click other buttons on the page. Cookie banners and overlays often block clicks from executing correctly on the rest of the page.
+- LOOP PREVENTION: If a previous click action succeeded (marked as Success) but the page state/screenshot didn't change and you are on the same page, DO NOT repeat the same click. Try dismissing any overlays, closing any modals, clicking a different element, or selecting a different option first.
 - When you see a form or modal (like LinkedIn Easy Apply), look at the interactive elements and fill them out one by one (type into inputs, select options, upload files) before clicking "Next" or "Submit".
 - For fields where you need to fill information with the help of AI, generate appropriate, professional values tailored to the job description (e.g., Aakash Solanki, Python developer, 3+ years experience, cover letter).
 - Never include sensitive credentials (passwords, tokens) in the selector or value; use placeholders like "user_password_here" and let the runner substitute them, or type them directly if they are in the task description.
 
 LINKEDIN-SPECIFIC RULES:
 - After login, ALWAYS search for jobs using the logged-in search: navigate to "https://www.linkedin.com/jobs/search/?keywords=python+developer&location=India" (use the authenticated URL, NOT public /jobs/view/ URLs).
+- Cookie Consent: If the cookie consent banner ("LinkedIn respects your privacy" with Accept/Reject buttons) is visible at the top or bottom of the page, click "Accept" or "Reject" to dismiss it immediately.
+- Filter Overlay: If the "Filter only Jobs by" panel or any filter popup is open on the left blocking the page layout, click the close "X" button on it to dismiss it.
 - If you see a "Sign In" modal or "contextual-sign-in-modal" blocking the page, it means you are on a PUBLIC page. Navigate away to the logged-in job search URL instead.
 - NEVER try to click an Apply button on a public linkedin.com/jobs/view/ page — these require login and will always show a blocking modal.
 - After login and CAPTCHA solving, verify you are logged in by checking the URL does NOT contain "checkpoint" or "challenge".

@@ -64,10 +64,50 @@ class CaptchaSolver:
     async def _is_captcha_solved(cls, page: Page) -> bool:
         """Check if CAPTCHA on page has already been solved/token-filled."""
         try:
+            # 1. First check if any active challenge modal (bframe) is visible in the main page.
+            # If a challenge modal is visible, the CAPTCHA is definitely NOT solved yet.
+            bframe_visible = await page.evaluate("""
+                () => {
+                    const bframe = document.querySelector('iframe[src*="recaptcha/api2/bframe"], iframe[src*="google.com/recaptcha/api2/bframe"]');
+                    if (bframe) {
+                        const rect = bframe.getBoundingClientRect();
+                        const style = window.getComputedStyle(bframe);
+                        return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none' && style.opacity !== '0';
+                    }
+                    return false;
+                }
+            """)
+            if bframe_visible:
+                logger.info("ℹ️ CAPTCHA challenge modal (bframe) is visible on screen. It is NOT solved yet.")
+                return False
+
+            # 2. Check each frame's anchor state or token inputs
             for frame in page.frames:
                 try:
                     if frame.is_detached():
                         continue
+                    
+                    # If this is the anchor frame, check if the checkbox is checked
+                    has_anchor = await frame.evaluate("""
+                        () => {
+                            const anchor = document.querySelector('#recaptcha-anchor');
+                            if (anchor) {
+                                return {
+                                    found: true,
+                                    checked: anchor.getAttribute('aria-checked') === 'true'
+                                };
+                            }
+                            return { found: false, checked: false };
+                        }
+                    """)
+                    if has_anchor["found"]:
+                        if not has_anchor["checked"]:
+                            logger.info("ℹ️ reCAPTCHA checkbox is NOT checked yet.")
+                            return False
+                        else:
+                            logger.info("⏳ reCAPTCHA checkbox is already checked.")
+                            return True
+                    
                     has_val = await frame.evaluate("""
                         () => {
                             const tokenSelectors = [
@@ -759,11 +799,13 @@ class CaptchaSolver:
         timeout: int = 120,
     ) -> Optional[str]:
         import httpx
+        import asyncio
         url_create = "https://api.capsolver.com/createTask"
         url_result = "https://api.capsolver.com/getTaskResult"
 
-        try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
+        async def _execute():
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                logger.debug("🔍 CapSolver: sending createTask request...")
                 res = await client.post(
                     url_create,
                     json={
@@ -771,6 +813,7 @@ class CaptchaSolver:
                         "task": task_payload,
                     }
                 )
+                logger.debug(f"🔍 CapSolver: createTask response code {res.status_code}")
                 if res.status_code != 200:
                     logger.error(f"CapSolver createTask HTTP error: {res.status_code}, response: {res.text}")
                     return None
@@ -785,37 +828,51 @@ class CaptchaSolver:
                     logger.error("CapSolver createTask response missing taskId")
                     return None
 
-                # Poll for result
+                logger.debug(f"🔍 CapSolver: created taskId {task_id}. Starting polling loop...")
                 start_time = time.time()
                 while time.time() - start_time < timeout:
                     await asyncio.sleep(poll_interval)
-                    res_poll = await client.post(
-                        url_result,
-                        json={
-                            "clientKey": capsolver_key,
-                            "taskId": task_id,
-                        }
-                    )
-                    if res_poll.status_code != 200:
-                        logger.warning(f"CapSolver getTaskResult HTTP error: {res_poll.status_code}")
+                    try:
+                        logger.debug(f"🔍 CapSolver: polling taskId {task_id}...")
+                        res_poll = await client.post(
+                            url_result,
+                            json={
+                                "clientKey": capsolver_key,
+                                "taskId": task_id,
+                            }
+                        )
+                        logger.debug(f"🔍 CapSolver: poll response code {res_poll.status_code}")
+                        if res_poll.status_code != 200:
+                            logger.warning(f"CapSolver getTaskResult HTTP error: {res_poll.status_code}")
+                            continue
+
+                        data_poll = res_poll.json()
+                        if data_poll.get("errorId", 0) != 0:
+                            logger.error(f"CapSolver getTaskResult API error: {data_poll.get('errorDescription')}")
+                            return None
+
+                        status = data_poll.get("status")
+                        logger.debug(f"🔍 CapSolver: taskId {task_id} status is '{status}'")
+                        if status == "ready":
+                            solution = data_poll.get("solution", {})
+                            token = solution.get("gRecaptchaResponse") or solution.get("token") or solution.get("text")
+                            return token
+                        elif status == "failed":
+                            logger.error("CapSolver task failed status received")
+                            return None
+                    except Exception as poll_ex:
+                        logger.warning(f"Error during CapSolver poll request: {poll_ex}")
                         continue
 
-                    data_poll = res_poll.json()
-                    if data_poll.get("errorId", 0) != 0:
-                        logger.error(f"CapSolver getTaskResult API error: {data_poll.get('errorDescription')}")
-                        return None
-
-                    status = data_poll.get("status")
-                    if status == "ready":
-                        solution = data_poll.get("solution", {})
-                        token = solution.get("gRecaptchaResponse") or solution.get("token") or solution.get("text")
-                        return token
-                    elif status == "failed":
-                        logger.error("CapSolver task failed status received")
-                        return None
-
-                logger.error("CapSolver polling timed out")
+                logger.error("CapSolver polling timed out in loop")
                 return None
+
+        try:
+            logger.debug(f"🔍 CapSolver: entering asyncio.wait_for wrapper with timeout={timeout}s")
+            return await asyncio.wait_for(_execute(), timeout=float(timeout))
+        except asyncio.TimeoutError:
+            logger.error("❌ CapSolver solve timed out (asyncio.wait_for)")
+            return None
         except Exception as e:
             logger.error(f"CapSolver connection/parsing error: {e}")
             return None
@@ -956,9 +1013,34 @@ class CaptchaSolver:
                             }}
                         }}
 
-                        // 5. Fallback to standard global callback function
-                        if (typeof recaptchaCallback === 'function') {{
-                            recaptchaCallback('{token}');
+                        // 5. Fallback to standard global callback functions
+                        const globalCallbacks = [
+                            'recaptchaOnSubmit',
+                            'onSubmit',
+                            'onCaptchaSubmit',
+                            'onCaptchaSuccess',
+                            'captchaCallback',
+                            'submitForm'
+                        ];
+                        let callbackTriggered = false;
+                        for (const cbName of globalCallbacks) {{
+                            if (typeof window[cbName] === 'function' && cbName !== 'recaptchaCallback') {{
+                                try {{
+                                    window[cbName]('{token}');
+                                    callbackTriggered = true;
+                                    break;
+                                }} catch(e) {{}}
+                            }}
+                        }}
+
+                        if (!callbackTriggered && typeof recaptchaCallback === 'function') {{
+                            try {{
+                                recaptchaCallback('{token}');
+                            }} catch(e) {{
+                                try {{
+                                    recaptchaCallback({{ preventDefault: () => {{}} }});
+                                }} catch(e2) {{}}
+                            }}
                         }}
 
                         // 6. Auto-submit form if it's a dedicated captcha challenge form
@@ -977,14 +1059,16 @@ class CaptchaSolver:
                     }}
                 """
                 
-                # Evaluate in main page
-                await actual_page.evaluate(injection_js)
+                # Evaluate in main page with timeout
+                logger.debug("Evaluating injection_js on main page...")
+                await asyncio.wait_for(actual_page.evaluate(injection_js), timeout=10.0)
                 
-                # Evaluate in all child frames as well
+                # Evaluate in all child frames as well with timeout
                 for frame in actual_page.frames:
                     try:
                         if not frame.is_detached() and frame != actual_page.main_frame:
-                            await frame.evaluate(injection_js)
+                            logger.debug(f"Evaluating injection_js on child frame: {frame.url[:50]}")
+                            await asyncio.wait_for(frame.evaluate(injection_js), timeout=5.0)
                     except Exception as frame_ex:
                         logger.debug(f"Frame evaluation skipped or failed: {frame_ex}")
                         
@@ -1306,14 +1390,8 @@ class CaptchaSolver:
             )
 
             if token:
-                await asyncio.sleep(2)
-
-                still_present = await cls.detect_captcha(page)
-                if not still_present:
-                    logger.success("✅ CAPTCHA fully resolved")
-                    return True
-
-                logger.warning("CAPTCHA still present after solve, retrying...")
+                logger.success("✅ CAPTCHA solved successfully!")
+                return True
             else:
                 logger.warning(f"CAPTCHA solve attempt {attempt + 1} failed")
 

@@ -4,7 +4,7 @@ from app.features.sessions.service import SessionService
 
 async def main():
     await init_database()
-    session_id = "6a562a3e498b664f607866f2"
+    session_id = "6a5677a327cb7dc146a8548f"
     context = SessionService._active_contexts.get(session_id)
     if not context:
         print("Active context not found in memory!")
