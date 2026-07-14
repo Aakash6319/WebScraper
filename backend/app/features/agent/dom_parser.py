@@ -187,7 +187,7 @@ class PageAgentDOMParser:
             if el.get('autocomplete'):
                 extras.append(f"autocomplete:{el['autocomplete']}")
             if el.get('value'):
-                extras.append(f"value:{el['value'][:30]}")
+                extras.append(f"value:{str(el['value'])[:30]}")
             
             extra_str = f" ({', '.join(extras)})" if extras else ""
             lines.append(f"[{idx}] {desc}{label_str}{extra_str}")

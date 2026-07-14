@@ -11,9 +11,10 @@ from app.features.auth.models import UserDocument
 from app.core.security import encrypt_credential
 
 async def main():
-    print("Connecting to MongoDB at local port 27017...")
+    mongo_uri = os.getenv("MONGODB_URI", "mongodb://localhost:27017")
+    print(f"Connecting to MongoDB at {mongo_uri}...")
     try:
-        client = AsyncIOMotorClient("mongodb://localhost:27017", serverSelectionTimeoutMS=2000)
+        client = AsyncIOMotorClient(mongo_uri, serverSelectionTimeoutMS=2000)
         # Test connection
         await client.admin.command('ping')
         print("Connected to MongoDB successfully!")
@@ -46,12 +47,12 @@ async def main():
         user.deepseek_api_key_encrypted = encrypt_credential("sk-5c8c555bccfb4b9eb8b24649df516a89")
         user.anticaptcha_api_key_encrypted = encrypt_credential("81823bd7a8f821102709de3601ed846e")
         user.capsolver_api_key_encrypted = encrypt_credential("CAP-F35972E69C6D5BF5C130A55A9FBD727989D73D4DA2E01770E252CC0714FC9495")
-        user.webshare_proxy_username_encrypted = encrypt_credential("zkoanprw")
-        user.webshare_proxy_password_encrypted = encrypt_credential("fxg9gvct26g5")
-        user.proxy_host = "198.105.121.200"
-        user.proxy_port = 6462
+        user.webshare_proxy_username_encrypted = None
+        user.webshare_proxy_password_encrypted = None
+        user.proxy_host = None
+        user.proxy_port = None
         await user.save()
-        print(f"✅ Credentials successfully encrypted and saved for {user.email}!")
+        print(f"✅ Credentials successfully reset to use dynamic Webshare proxy pool for {user.email}!")
 
 if __name__ == "__main__":
     asyncio.run(main())

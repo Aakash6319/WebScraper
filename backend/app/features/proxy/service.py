@@ -25,14 +25,19 @@ class ProxyService:
     """
 
     _cached_proxies: List[Dict[str, Any]] = []
+    _cache_fetched_at: float = 0.0
 
     @classmethod
-    async def _fetch_proxies(cls) -> List[Dict[str, Any]]:
+    async def _fetch_proxies(cls, force_refresh: bool = False) -> List[Dict[str, Any]]:
         """
         Fetch the list of valid proxies from Webshare API.
-        Caches the result in memory to avoid hitting rate limits.
+        Caches the result in memory for up to 5 minutes.
+        Pass force_refresh=True to bypass cache.
         """
-        if cls._cached_proxies:
+        import time
+        now = time.monotonic()
+        cache_age = now - cls._cache_fetched_at
+        if cls._cached_proxies and not force_refresh and cache_age < 300:
             return cls._cached_proxies
 
         api_key = settings.WEBSHARE_API_KEY
@@ -82,6 +87,7 @@ class ProxyService:
                 valid_proxies = [p for p in results if p.get("valid", True)]
                 if valid_proxies:
                     cls._cached_proxies = valid_proxies
+                    cls._cache_fetched_at = now
                     logger.info(f"Successfully cached {len(valid_proxies)} proxies from Webshare.")
                     return cls._cached_proxies
             
@@ -113,8 +119,8 @@ class ProxyService:
         Returns:
             Dict with 'server', 'username', 'password', 'host', 'port' keys.
         """
-        # If custom credentials/host are explicitly requested, use them
-        if proxy_host and proxy_port:
+        # If custom credentials/host are explicitly requested, use them (but ignore the default Webshare hosts)
+        if proxy_host and proxy_port and proxy_host not in ("p.webshare.io", settings.WEBSHARE_PROXY_HOST):
             username = proxy_username or ""
             password = proxy_password or ""
             server = f"http://{username}:{password}@{proxy_host}:{proxy_port}" if username else f"http://{proxy_host}:{proxy_port}"
@@ -141,30 +147,48 @@ class ProxyService:
             )
             return {"server": server, "username": username, "password": password, "host": host, "port": port}
 
-        # Pick a proxy randomly from pool
-        selected = random.choice(proxies)
-        host = selected["proxy_address"]
-        port = selected["port"]
-        username = selected["username"]
-        password = selected["password"]
+        # Pick a proxy randomly from pool and verify it is working
+        max_attempts = 6
+        for attempt in range(max_attempts):
+            selected = random.choice(proxies)
+            host = selected["proxy_address"]
+            port = selected["port"]
+            username = selected["username"]
+            password = selected["password"]
+            server = f"http://{username}:{password}@{host}:{port}"
 
-        server = f"http://{username}:{password}@{host}:{port}"
-        logger.info(f"🔌 Using Webshare Proxy from pool: {host}:{port} (Country: {selected.get('country_code')})")
-        return {"server": server, "username": username, "password": password, "host": host, "port": port}
+            # Only verify if it's not the last attempt to avoid blocking completely
+            if attempt < max_attempts - 1:
+                try:
+                    async with httpx.AsyncClient(proxy=server, timeout=3.0) as client:
+                        resp = await client.get("https://www.google.com", timeout=3.0)
+                        if resp.status_code == 200:
+                            logger.info(f"🔌 Using verified Webshare Proxy: {host}:{port} (Country: {selected.get('country_code')})")
+                            return {"server": server, "username": username, "password": password, "host": host, "port": port}
+                except Exception as e:
+                    logger.warning(f"⚠️ Proxy verification failed for {host}:{port}: {e}. Retrying ({attempt + 1}/{max_attempts})...")
+                    continue
+            else:
+                logger.warning(f"🔌 Verification fallback: using Webshare Proxy without verification: {host}:{port}")
+                return {"server": server, "username": username, "password": password, "host": host, "port": port}
 
     @classmethod
     async def rotate_proxy(
         cls,
         proxy_username: Optional[str] = None,
         proxy_password: Optional[str] = None,
+        target_url: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
-        Request a new proxy IP by selecting a different proxy from the cached pool.
+        Request a new proxy IP by selecting a different proxy from the pool.
+        Always force-refreshes from Webshare API to avoid stale cached IPs.
+        Verifies the proxy against target_url (or Google as fallback).
 
         Returns:
             New proxy config with different IP.
         """
-        proxies = await cls._fetch_proxies()
+        # Force-refresh the proxy list from Webshare to avoid reusing blocked IPs
+        proxies = await cls._fetch_proxies(force_refresh=True)
         if not proxies:
             import uuid
             rotation_id = uuid.uuid4().hex[:8]
@@ -186,15 +210,46 @@ class ProxyService:
                 "password": password,
             }
 
-        # Rotate to a different proxy randomly from pool
-        selected = random.choice(proxies)
+        # Shuffle pool and try proxies until one works against target_url
+        shuffled = proxies.copy()
+        random.shuffle(shuffled)
+        check_url = target_url or "https://www.google.com"
+        max_verify_attempts = min(10, len(shuffled))
+
+        for attempt, selected in enumerate(shuffled[:max_verify_attempts]):
+            host = selected["proxy_address"]
+            port = selected["port"]
+            username = selected["username"]
+            password = selected["password"]
+            server = f"http://{username}:{password}@{host}:{port}"
+
+            try:
+                async with httpx.AsyncClient(proxy=server, timeout=8.0, follow_redirects=True) as client:
+                    resp = await client.get(check_url, timeout=8.0)
+                    # Accept any non-403/non-5xx status as "reachable"
+                    if resp.status_code not in (403, 500, 502, 503, 504):
+                        logger.info(f"🔄 Proxy rotated → verified {host}:{port} (status={resp.status_code}) against {check_url}")
+                        return {
+                            "server": server,
+                            "username": username,
+                            "password": password,
+                            "host": host,
+                            "port": port,
+                        }
+                    else:
+                        logger.warning(f"⚠️ Proxy {host}:{port} returned {resp.status_code} for {check_url}, trying next...")
+            except Exception as e:
+                logger.warning(f"⚠️ Proxy {host}:{port} failed verification: {e}. Trying next ({attempt + 1}/{max_verify_attempts})...")
+                continue
+
+        # Fallback: use last candidate without verification
+        selected = shuffled[0]
         host = selected["proxy_address"]
         port = selected["port"]
         username = selected["username"]
         password = selected["password"]
-
         server = f"http://{username}:{password}@{host}:{port}"
-        logger.info(f"🔄 Proxy rotated to different Webshare pool IP: {host}:{port}")
+        logger.warning(f"🔄 All verification attempts failed — using {host}:{port} without verification")
         return {
             "server": server,
             "username": username,

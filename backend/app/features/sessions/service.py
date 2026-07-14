@@ -325,6 +325,79 @@ class SessionService:
         }
 
     @classmethod
+    async def rotate_session_proxy(
+        cls,
+        session_id: str,
+        user_id: str,
+        user_api_keys: Optional[Dict[str, str]] = None,
+        target_url: Optional[str] = None,
+    ) -> Any:
+        """
+        Rotates the proxy of an active session by closing the old context,
+        fetching a fresh verified proxy, and recreating the context with restored state.
+        """
+        session = await cls.get_session(session_id, user_id)
+
+        # 1. Close old context
+        old_context = cls._active_contexts.get(session_id)
+        if old_context:
+            try:
+                cookies = await old_context.cookies()
+                if cookies:
+                    session.cookies = cookies
+                    await session.save()
+                await old_context.close()
+            except Exception as e:
+                logger.warning(f"Error closing old context during proxy rotation: {e}")
+            cls._active_contexts.pop(session_id, None)
+
+        # 2. Get a new rotated verified proxy
+        proxy_username = None
+        proxy_password = None
+        if user_api_keys:
+            proxy_username = user_api_keys.get("proxy_username")
+            proxy_password = user_api_keys.get("proxy_password")
+
+        proxy_config = await ProxyService.rotate_proxy(
+            proxy_username=proxy_username,
+            proxy_password=proxy_password,
+            target_url=target_url,
+        )
+
+        if proxy_config:
+            session.proxy_ip = proxy_config.get("host")
+            await session.save()
+
+        # 3. Create context options
+        browser = await cls._get_or_create_browser()
+        context_options: Dict[str, Any] = {
+            "viewport": {
+                "width": session.viewport_width,
+                "height": session.viewport_height,
+            },
+            "locale": session.locale,
+            "timezone_id": session.timezone_id,
+            "user_agent": session.user_agent,
+            "permissions": ["geolocation"],
+        }
+
+        if proxy_config:
+            context_options["proxy"] = {
+                "server": proxy_config["server"],
+                "username": proxy_config.get("username"),
+                "password": proxy_config.get("password"),
+            }
+
+        # 4. Recreate context and restore cookies
+        context = await browser.new_context(**context_options)
+        if session.cookies:
+            await context.add_cookies(session.cookies)
+
+        cls._active_contexts[session_id] = context
+        logger.info(f"🔄 Session {session_id} successfully rotated to fresh proxy: {session.proxy_ip}")
+        return context
+
+    @classmethod
     async def close_session(cls, session_id: str, user_id: str) -> None:
         """Close a session and clean up Playwright context."""
         session = await cls.get_session(session_id, user_id)

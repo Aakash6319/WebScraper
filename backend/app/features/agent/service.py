@@ -218,12 +218,16 @@ class AgentService:
 
                     is_verification_page = False
 
-                    # Check URL and title keywords
-                    if "checkpoint/challenge" in current_url_lower or "security verification" in current_title_lower or "verification" in current_title_lower:
+                    # Check URL and title keywords — only trigger on explicit checkpoint URLs
+                    if "checkpoint/challenge" in current_url_lower or "checkpoint" in current_url_lower:
                         is_verification_page = True
 
-                    # Check text keywords
-                    for kw in ["verification code", "verification-code", "security code", "enter the code", "enter the 6-digit", "sent to your email", "sent to", "security check", "quick security check"]:
+                    # Only check title for very explicit verification titles
+                    if "security verification" in current_title_lower and "linkedin" in current_url_lower:
+                        is_verification_page = True
+
+                    # Check text keywords — use only very specific OTP phrases unlikely to appear on commerce sites
+                    for kw in ["verification code", "enter the code", "enter the 6-digit", "enter your one-time", "enter the one-time"]:
                         if kw in page_text_lower:
                             is_verification_page = True
                             break
@@ -425,60 +429,64 @@ class AgentService:
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                 }
 
-                try:
-                    # Execute the action
-                    result = await cls._execute_action(
-                        page=page,
-                        action=action,
-                        selector=selector,
-                        value=value,
-                        task=task,
-                        step_result=step_result,
-                        user_id=user_id,
-                        deepseek_key=deepseek_key or "",
-                    )
+                success = False
+                attempt = 0
+                max_attempts = 1 + task.max_retries
 
-                    step_result.update(result)
-                    step_result["success"] = True
-
-                    pass
-
-                except Exception as e:
-                    logger.error(f"  ❌ Step {step_idx + 1} failed: {e}")
-                    step_result["error"] = str(e)
-                    step_result["success"] = False
-
-                    # Retry logic
-                    if task.retry_count < task.max_retries:
-                        task.retry_count += 1
-                        step_result["retried"] = True
-                        logger.info(f"  🔄 Retrying ({task.retry_count}/{task.max_retries})...")
-
-                        try:
+                while attempt < max_attempts and not success:
+                    try:
+                        if attempt > 0:
+                            task.retry_count += 1
+                            step_result["retried"] = True
+                            logger.info(f"  🔄 Retrying ({task.retry_count}/{task.max_retries}) [Attempt {attempt + 1}/{max_attempts}]...")
                             await asyncio.sleep(2)
-                            alt_result = await cls._execute_action(
-                                page=page,
-                                action=action,
-                                selector=selector,
-                                value=value,
-                                task=task,
-                                step_result=step_result,
-                                is_retry=True,
-                                user_id=user_id,
-                                deepseek_key=deepseek_key or "",
-                            )
-                            step_result.update(alt_result)
-                            step_result["success"] = True
-                        except Exception as retry_e:
-                            step_result["error"] = f"Retry also failed: {retry_e}"
 
-                    if not step_result["success"]:
-                        task.status = TaskStatus.FAILED
-                        task.error_message = f"Step {step_idx + 1} failed: {step_result.get('error')}"
-                        task.steps_executed.append(step_result)
-                        task.screenshots = screenshots
-                        await task.save()
-                        return
+                            # Rotate proxy and recreate page if navigation/timeout/proxy/connection/block error occurred
+                            err_str = step_result.get("error", "").lower()
+                            if any(x in err_str for x in ("timeout", "navigation", "proxy", "connect", "block", "forbidden", "denied", "access")):
+                                logger.info("🔄 Navigation/Timeout error detected. Rotating session proxy and recreating page...")
+                                # Determine target URL to verify proxy against
+                                proxy_target_url = value if (action == "navigate" and value and value.startswith("http")) else page.url
+                                context = await SessionService.rotate_session_proxy(
+                                    session_id=session_id,
+                                    user_id=user_id,
+                                    user_api_keys=api_keys,
+                                    target_url=proxy_target_url,
+                                )
+                                page = await context.new_page()
+
+                        # Execute the action
+                        result = await cls._execute_action(
+                            page=page,
+                            action=action,
+                            selector=selector,
+                            value=value,
+                            task=task,
+                            step_result=step_result,
+                            is_retry=(attempt > 0),
+                            user_id=user_id,
+                            deepseek_key=deepseek_key or "",
+                        )
+
+                        step_result.update(result)
+                        step_result["success"] = True
+                        success = True
+                        if "error" in step_result:
+                            del step_result["error"]
+
+                    except Exception as e:
+                        logger.error(f"  ❌ Step {step_idx + 1} attempt {attempt + 1} failed: {e}")
+                        step_result["error"] = str(e)
+                        step_result["success"] = False
+                        attempt += 1
+
+                if not step_result["success"]:
+                    task.status = TaskStatus.FAILED
+                    task.error_message = f"Step {step_idx + 1} failed: {step_result.get('error')}"
+                    task.steps_executed.append(step_result)
+                    task.screenshots = screenshots
+                    await task.save()
+                    return
 
                 task.steps_executed.append(step_result)
                 task.screenshots = screenshots
@@ -532,7 +540,8 @@ class AgentService:
             )
 
         except Exception as e:
-            logger.error(f"❌ Agent execution failed for task {task_id}: {e}")
+            import traceback
+            logger.error(f"❌ Agent execution failed for task {task_id}: {e}\n{traceback.format_exc()}")
             try:
                 task.status = TaskStatus.FAILED
                 task.error_message = str(e)

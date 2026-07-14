@@ -917,7 +917,21 @@ class HumanBehavior:
         """
         import asyncio
 
-        await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+        response = await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+
+        # Check if the page loaded with a WAF block
+        status = response.status if response else None
+        title = await page.title() or ""
+        content = await page.content() or ""
+
+        if (
+            (status and status in (403, 503, 401, 502)) or
+            "forbidden" in title.lower() or
+            "access denied" in title.lower() or
+            "403 forbidden" in content.lower() or
+            "access denied" in content.lower()
+        ):
+            raise Exception(f"Access Blocked: Status {status}, Title '{title}'. Proxy needs rotation.")
 
         # Simulate user watching page load (random glance time)
         await asyncio.sleep(random.uniform(1.2, 3.5))
