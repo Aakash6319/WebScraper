@@ -1,0 +1,56 @@
+# AutoWebAgent - Root .gitignore
+
+# ── Python ────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+*.so
+.Python
+env/
+venv/
+.venv/
+*.whl
+
+# ── Environment ───────────────────────────
+.env
+.env.local
+.env.production
+*.env
+
+# ── IDE ──────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# ── Logs ─────────────────────────────────
+logs/
+*.log
+
+# ── Node ─────────────────────────────────
+node_modules/
+.next/
+out/
+
+# ── Docker ───────────────────────────────
+docker-compose.override.yml
+
+# ── Coverage ─────────────────────────────
+coverage/
+.coverage
+htmlcov/
+.pytest_cache/
+
+# ── Playwright ───────────────────────────
+playwright-report/
+test-results/
+
+# ── Misc ─────────────────────────────────
+*.pem
+*.key

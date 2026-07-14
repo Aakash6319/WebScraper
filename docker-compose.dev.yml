@@ -1,0 +1,109 @@
+# AutoWebAgent - Development Docker Compose
+# ==========================================
+# Enables hot-reloading for both frontend (Next.js) and backend (FastAPI).
+# Run with:
+#   docker compose -f docker-compose.dev.yml up
+#
+# No rebuilding required when code changes!
+
+version: '3.9'
+
+services:
+  # ── MongoDB ──────────────────────────────────────────────
+  mongodb:
+    image: mongo:7
+    container_name: autowebagent-mongodb-dev
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_DATABASE: autowebagent
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb_data_dev:/data/db
+    networks:
+      - autowebagent-net-dev
+
+  # ── Redis ────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: autowebagent-redis-dev
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data_dev:/data
+    networks:
+      - autowebagent-net-dev
+
+  # ── Backend (FastAPI with hot-reload) ────────────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: autowebagent-backend-dev
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - ENVIRONMENT=development
+      - DEBUG=true
+      - MONGODB_URI=mongodb://mongodb:27017
+      - MONGODB_DB_NAME=autowebagent
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/1
+      - CELERY_RESULT_BACKEND=redis://redis:6379/2
+      - BACKEND_CORS_ORIGINS=["http://localhost:3000"]
+      - SECRET_KEY=change-me-in-development
+      - ENCRYPTION_KEY=autowebagent-fernet-key-must-be-32-bytes!
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
+      - DEEPSEEK_MODEL=${DEEPSEEK_MODEL:-deepseek-chat}
+      - CAPSOLVER_API_KEY=${CAPSOLVER_API_KEY:-}
+      - ANTICAPTCHA_API_KEY=${ANTICAPTCHA_API_KEY:-}
+      - WEBSHARE_PROXY_USERNAME=${WEBSHARE_PROXY_USERNAME:-hbsbcwnt}
+      - WEBSHARE_PROXY_PASSWORD=${WEBSHARE_PROXY_PASSWORD:-gpgyzet0ed8d}
+      - BROWSER_HEADLESS=true
+      - STEALTH_MODE=ultra
+      - LOG_LEVEL=DEBUG
+      - LOG_FORMAT=text
+    volumes:
+      - ./backend:/app
+    depends_on:
+      - mongodb
+      - redis
+    networks:
+      - autowebagent-net-dev
+
+  # ── Frontend (Next.js with hot-reload) ───────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      target: builder
+    container_name: autowebagent-frontend-dev
+    command: npx next dev --hostname 0.0.0.0 --port 3000
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=development
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+      - /app/.next
+    depends_on:
+      - backend
+    networks:
+      - autowebagent-net-dev
+
+# ── Volumes ────────────────────────────────────────────────
+volumes:
+  mongodb_data_dev:
+    driver: local
+  redis_data_dev:
+    driver: local
+
+# ── Network ────────────────────────────────────────────────
+networks:
+  autowebagent-net-dev:
+    driver: bridge

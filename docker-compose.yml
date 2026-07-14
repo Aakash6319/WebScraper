@@ -1,0 +1,130 @@
+# AutoWebAgent - Docker Compose
+# ================================
+# One-command startup for the entire platform:
+#   docker-compose up --build
+#
+# Services:
+# 1. MongoDB — Database
+# 2. Redis — Cache & Task Queue
+# 3. Backend — FastAPI server
+# 4. Frontend — Next.js app
+
+version: '3.9'
+
+services:
+  # ── MongoDB ──────────────────────────────────────────────
+  mongodb:
+    image: mongo:7
+    container_name: autowebagent-mongodb
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_DATABASE: autowebagent
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - autowebagent-net
+
+  # ── Redis ────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: autowebagent-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - autowebagent-net
+
+  # ── Backend (FastAPI) ────────────────────────────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: autowebagent-backend
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - ENVIRONMENT=production
+      - DEBUG=false
+      - MONGODB_URI=mongodb://mongodb:27017
+      - MONGODB_DB_NAME=autowebagent
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/1
+      - CELERY_RESULT_BACKEND=redis://redis:6379/2
+      - BACKEND_CORS_ORIGINS=["http://localhost:3000"]
+      - SECRET_KEY=${SECRET_KEY:-change-me-in-production}
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY:-autowebagent-fernet-key-must-be-32-bytes!}
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}
+      - DEEPSEEK_MODEL=${DEEPSEEK_MODEL:-deepseek-chat}
+      - ANTICAPTCHA_API_KEY=${ANTICAPTCHA_API_KEY}
+      - CAPSOLVER_API_KEY=${CAPSOLVER_API_KEY}
+      - WEBSHARE_API_KEY=${WEBSHARE_API_KEY}
+      - WEBSHARE_PROXY_USERNAME=${WEBSHARE_PROXY_USERNAME}
+      - WEBSHARE_PROXY_PASSWORD=${WEBSHARE_PROXY_PASSWORD}
+      - WEBSHARE_PROXY_HOST=${WEBSHARE_PROXY_HOST}
+      - WEBSHARE_PROXY_PORT=${WEBSHARE_PROXY_PORT}
+      - BROWSER_HEADLESS=true
+      - STEALTH_MODE=ultra
+      - LOG_LEVEL=INFO
+      - LOG_FORMAT=json
+    dns:
+      - 8.8.8.8
+    volumes:
+      - ./backend/logs:/app/logs
+      - ./backend/app:/app/app
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    networks:
+      - autowebagent-net
+
+  # ── Frontend (Next.js) ───────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: autowebagent-frontend
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+    depends_on:
+      - backend
+    networks:
+      - autowebagent-net
+
+# ── Volumes ────────────────────────────────────────────────
+volumes:
+  mongodb_data:
+    driver: local
+  redis_data:
+    driver: local
+
+# ── Network ────────────────────────────────────────────────
+networks:
+  autowebagent-net:
+    driver: bridge
