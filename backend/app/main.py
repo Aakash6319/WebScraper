@@ -148,13 +148,72 @@ async def general_exception_handler(request: Request, exc: Exception):
 
 @app.get("/health", tags=["Health"])
 async def health_check():
-    """Basic health check endpoint."""
-    return {
+    """
+    Rich health check — shows proxy pool, sessions, task stats, API key status.
+    Useful for monitoring and debugging at a glance.
+    """
+    import time
+    from app.features.sessions.service import SessionService
+    from app.features.proxy.service import ProxyService
+    from app.features.tasks.models import TaskDocument, TaskStatus
+
+    result = {
         "status": "healthy",
         "version": settings.APP_VERSION,
         "environment": settings.ENVIRONMENT,
-        "stealth_mode": settings.STEALTH_MODE,
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
+
+    # ── Proxy Pool Stats ─────────────────────────────────
+    try:
+        total_proxies = len(ProxyService._cached_proxies)
+        blacklisted = len(ProxyService._blacklisted_proxies)
+        available = total_proxies - blacklisted
+        result["proxy_pool"] = {
+            "total": total_proxies,
+            "blacklisted": blacklisted,
+            "available": available,
+            "blacklisted_ips": list(ProxyService._blacklisted_proxies)[:10],  # show first 10
+        }
+    except Exception as e:
+        result["proxy_pool"] = {"error": str(e)}
+
+    # ── Active Browser Sessions ──────────────────────────
+    try:
+        active_contexts = len(SessionService._active_contexts)
+        result["browser_sessions"] = {
+            "active_contexts": active_contexts,
+            "session_ids": list(SessionService._active_contexts.keys()),
+        }
+    except Exception as e:
+        result["browser_sessions"] = {"error": str(e)}
+
+    # ── Task Statistics ──────────────────────────────────
+    try:
+        pending   = await TaskDocument.find(TaskDocument.status == TaskStatus.PENDING).count()
+        running   = await TaskDocument.find(TaskDocument.status == TaskStatus.RUNNING).count()
+        completed = await TaskDocument.find(TaskDocument.status == TaskStatus.COMPLETED).count()
+        failed    = await TaskDocument.find(TaskDocument.status == TaskStatus.FAILED).count()
+        waiting   = await TaskDocument.find(TaskDocument.status == "waiting_user_input").count()
+        result["tasks"] = {
+            "pending": pending,
+            "running": running,
+            "waiting_user_input": waiting,
+            "completed": completed,
+            "failed": failed,
+            "total": pending + running + completed + failed + waiting,
+        }
+    except Exception as e:
+        result["tasks"] = {"error": str(e)}
+
+    # ── API Keys Status ──────────────────────────────────
+    result["api_keys"] = {
+        "deepseek":    "✅ configured" if settings.DEEPSEEK_API_KEY else "❌ missing",
+        "webshare":    "✅ configured" if settings.WEBSHARE_API_KEY else "❌ missing",
+        "capsolver":   "✅ configured" if settings.CAPSOLVER_API_KEY else "❌ missing",
+    }
+
+    return result
 
 
 @app.get("/api/v1/debug/inspect")

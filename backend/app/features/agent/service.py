@@ -159,9 +159,12 @@ class AgentService:
 
             max_steps = 50
             step_idx = 0
-            completed = False
+            task_finished_successfully = False
+            # ── Anti-loop tracking ─────────────────────────────────────
+            _recent_nav_urls: list[str] = []   # track last 5 navigate URLs
+            _wait_scroll_streak: int = 0        # consecutive wait/scroll count
 
-            while step_idx < max_steps and not completed:
+            while step_idx < max_steps and not task_finished_successfully:
                 # 1. First scan and solve any CAPTCHA before doing any analysis or step decisions!
                 try:
                     captcha_detected = await CaptchaSolver.detect_captcha(page)
@@ -210,27 +213,37 @@ class AgentService:
 
                 # 2. Check if the page is asking for Security Verification (OTP/Email Code/Checkpoint)
                 try:
-                    page_text_lower = await page.evaluate("() => document.body.innerText.toLowerCase()")
-                    current_url = page.url
-                    current_title = await page.title()
-                    current_url_lower = current_url.lower()
-                    current_title_lower = current_title.lower()
-
                     is_verification_page = False
+                    for _eval_attempt in range(3):
+                        try:
+                            # Wait for load state to settle if navigating
+                            try:
+                                await page.wait_for_load_state("domcontentloaded", timeout=3000)
+                            except Exception:
+                                pass
+                            page_text_lower = await page.evaluate("() => document.body ? document.body.innerText.toLowerCase() : ''")
+                            current_url = page.url
+                            current_title = await page.title()
+                            current_url_lower = current_url.lower()
+                            current_title_lower = current_title.lower()
 
-                    # Check URL and title keywords — only trigger on explicit checkpoint URLs
-                    if "checkpoint/challenge" in current_url_lower or "checkpoint" in current_url_lower:
-                        is_verification_page = True
+                            # Check URL and title keywords — only trigger on explicit checkpoint URLs
+                            if "checkpoint/challenge" in current_url_lower or "checkpoint" in current_url_lower:
+                                is_verification_page = True
 
-                    # Only check title for very explicit verification titles
-                    if "security verification" in current_title_lower and "linkedin" in current_url_lower:
-                        is_verification_page = True
+                            # Only check title for very explicit verification titles
+                            if "security verification" in current_title_lower and "linkedin" in current_url_lower:
+                                is_verification_page = True
 
-                    # Check text keywords — use only very specific OTP phrases unlikely to appear on commerce sites
-                    for kw in ["verification code", "enter the code", "enter the 6-digit", "enter your one-time", "enter the one-time"]:
-                        if kw in page_text_lower:
-                            is_verification_page = True
+                            # Check text keywords — use only very specific OTP phrases unlikely to appear on commerce sites
+                            for kw in ["verification code", "enter the code", "enter the 6-digit", "enter your one-time", "enter the one-time"]:
+                                if kw in page_text_lower:
+                                    is_verification_page = True
+                                    break
                             break
+                        except Exception as eval_ex:
+                            logger.debug(f"Failed to evaluate page for OTP request (attempt {_eval_attempt + 1}): {eval_ex}")
+                            await asyncio.sleep(2)
 
                     # Check if we recently received user input and are still typing/submitting it
                     recent_input_received = False
@@ -405,31 +418,66 @@ class AgentService:
                 description = step.get("description", f"Step {step_idx + 1}")
 
                 # ── Hard Loop Detection ─────────────────────────────────────
-                # If the same action+description has been executed 3+ times in a row, break the loop
+                # Strategy 1: URL-fingerprint loop — same navigate URL repeated 3+ times
+                if action == "navigate" and value:
+                    _recent_nav_urls.append(value)
+                    if len(_recent_nav_urls) > 5:
+                        _recent_nav_urls.pop(0)
+                    if len(_recent_nav_urls) >= 3 and len(set(_recent_nav_urls[-3:])) == 1:
+                        logger.warning(f"🔁 Navigate loop detected! Same URL repeated 3+ times: '{value}'. Forcing extract to re-read page.")
+                        step = {
+                            "action": "extract",
+                            "selector": None,
+                            "value": None,
+                            "description": "Extract full page text to re-evaluate current state and break navigate loop",
+                        }
+                        action = step["action"]
+                        selector = None
+                        value = None
+                        description = step["description"]
+                        _recent_nav_urls.clear()
+
+                # Strategy 2: Fingerprint loop — action+url+description combo repeated 3+ times
                 if len(task.steps_executed) >= 3:
-                    recent = task.steps_executed[-3:]
-                    recent_descs = [s.get("description", "").lower() for s in recent]
-                    current_desc_lower = description.lower()
-                    if all(
-                        (current_desc_lower in d or d in current_desc_lower)
-                        for d in recent_descs
-                        if d
-                    ):
-                        logger.warning(f"🔁 Loop detected! Same action repeated 3+ times: '{description}'. Forcing scroll/next to break loop.")
+                    def _make_fingerprint(s: dict) -> str:
+                        return f"{s.get('action','')}|{s.get('description','').lower()[:60]}"
+                    current_fp = f"{action}|{description.lower()[:60]}"
+                    recent_fps = [_make_fingerprint(s) for s in task.steps_executed[-3:]]
+                    if all(fp == current_fp for fp in recent_fps):
+                        logger.warning(f"🔁 Fingerprint loop detected! Repeated 3x: '{current_fp}'. Forcing scroll to break loop.")
                         step = {
                             "action": "scroll",
-                            "value": "500",
-                            "description": "Scroll down to break out of action loop and re-evaluate page state",
+                            "value": "600",
+                            "description": "Scroll to break out of repeated action loop and re-evaluate page state",
                         }
                         action = step["action"]
                         selector = None
                         value = step["value"]
                         description = step["description"]
 
+                # Strategy 3: Wait/scroll streak — if 4+ consecutive wait/scroll steps, force a re-read
+                if action in ("wait", "scroll"):
+                    _wait_scroll_streak += 1
+                    if _wait_scroll_streak >= 4:
+                        logger.warning(f"🔁 Wait/scroll streak ({_wait_scroll_streak}) detected — forcing extract to break modal/overlay stall.")
+                        step = {
+                            "action": "extract",
+                            "selector": None,
+                            "value": None,
+                            "description": "Extract full page text to diagnose why agent is stuck waiting",
+                        }
+                        action = step["action"]
+                        selector = None
+                        value = None
+                        description = step["description"]
+                        _wait_scroll_streak = 0
+                else:
+                    _wait_scroll_streak = 0
+
                 # If action is 'complete', LLM believes task is finished
                 if action == "complete":
                     logger.success(f"🏁 Dynamic task completion signal received: {description}")
-                    completed = True
+                    task_finished_successfully = True
                     # Record the final complete step in plan
                     task.plan.append(step)
                     task.total_steps = len(task.plan)
@@ -476,6 +524,12 @@ class AgentService:
                                     target_url=proxy_target_url,
                                 )
                                 page = await context.new_page()
+                                if action != "navigate" and proxy_target_url and proxy_target_url != "about:blank":
+                                    logger.info(f"Navigating back to {proxy_target_url} after page/proxy recreation...")
+                                    try:
+                                        await page.goto(proxy_target_url, wait_until="networkidle", timeout=30000)
+                                    except Exception as nav_err:
+                                        logger.warning(f"Failed navigating back to {proxy_target_url} during retry: {nav_err}")
 
                         # Execute the action
                         result = await cls._execute_action(
@@ -530,7 +584,11 @@ class AgentService:
                 task.extracted_data = extracted_data
 
             # ── Step 4: Complete ─────────────────────────────
-            task.status = TaskStatus.COMPLETED
+            if task_finished_successfully:
+                task.status = TaskStatus.COMPLETED
+            else:
+                task.status = TaskStatus.FAILED
+                task.error_message = "Task failed: Max steps limit (50 steps) exceeded without completion."
             task.screenshots = screenshots[-3:]  # Keep last 3 screenshots
             task.completed_at = datetime.now(timezone.utc)
             if task.started_at:
@@ -565,13 +623,51 @@ class AgentService:
             import traceback
             logger.error(f"❌ Agent execution failed for task {task_id}: {e}\n{traceback.format_exc()}")
             try:
-                task.status = TaskStatus.FAILED
-                task.error_message = str(e)
-                if not task.completed_at:
-                    task.completed_at = datetime.now(timezone.utc)
-                await task.save()
+                # ── AUTO-RETRY LOGIC ──────────────────────────────────────
+                # If task has retries remaining, reset and re-run instead of failing
+                error_str = str(e).lower()
+                is_permanent = any(x in error_str for x in (
+                    "cancelled", "user cancelled", "max steps", "max_steps"
+                ))
+
+                if not is_permanent and task.retry_count < task.max_retries:
+                    task.retry_count += 1
+                    task.status = TaskStatus.RETRYING
+                    task.error_message = f"Attempt {task.retry_count} failed: {str(e)[:200]}. Retrying..."
+                    task.steps_executed = []    # clear steps for fresh start
+                    task.screenshots = []       # clear screenshots
+                    task.current_step = 0
+                    task.completed_at = None
+                    await task.save()
+
+                    logger.warning(
+                        f"🔁 Task {task_id} auto-retrying "
+                        f"(attempt {task.retry_count}/{task.max_retries}) in 3s..."
+                    )
+                    await asyncio.sleep(3)
+                    # Re-run — this call is async fire-and-forget from within itself,
+                    # use create_task to avoid blocking the finally block
+                    import asyncio as _asyncio
+                    _asyncio.create_task(cls.execute_task(task_id, user_id, api_keys))
+                    return  # exit current run; new task created above
+
+                else:
+                    # Max retries exhausted or permanent failure
+                    task.status = TaskStatus.FAILED
+                    task.error_message = (
+                        f"Failed after {task.retry_count} retries: {str(e)}"
+                        if task.retry_count > 0 else str(e)
+                    )
+                    if not task.completed_at:
+                        task.completed_at = datetime.now(timezone.utc)
+                    await task.save()
+                    logger.error(
+                        f"💀 Task {task_id} permanently failed "
+                        f"(retries={task.retry_count}/{task.max_retries})"
+                    )
             except Exception:
                 pass
+
         finally:
             try:
                 if "screenshot_worker_state" in locals():
@@ -681,7 +777,7 @@ class AgentService:
             if selector:
                 try:
                     if is_retry:
-                        await page.click(selector, force=True)
+                        await page.locator(selector).first.click(force=True, timeout=10000)
                     else:
                         await StealthManager.human_click(page, selector)
                     result["clicked"] = selector
@@ -759,7 +855,7 @@ class AgentService:
 
             if selector and value is not None:
                 try:
-                    await page.fill(selector, value)
+                    await page.locator(selector).first.fill(value, timeout=10000)
                     result["filled"] = value
                     result["method"] = "css_selector"
                 except Exception as css_err:

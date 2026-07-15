@@ -210,7 +210,7 @@ class PageAgentDOMParser:
         logger.debug(f"🎯 Resolving element [{index}]: {target['description']} via xpath={xpath}")
         
         # Use XPath locator
-        locator = page.locator(f"xpath={xpath}")
+        locator = page.locator(f"xpath={xpath}").first
         
         # Verify element is visible
         try:
@@ -218,7 +218,7 @@ class PageAgentDOMParser:
         except Exception:
             # Fallback: try by type and autocomplete  
             if target.get('autocomplete'):
-                locator = page.locator(f"[autocomplete='{target['autocomplete']}']")
+                locator = page.locator(f"[autocomplete='{target['autocomplete']}']").first
             elif target.get('type'):
                 locator = page.locator(f"input[type='{target['type']}']").first
         

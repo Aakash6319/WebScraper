@@ -26,6 +26,7 @@ class ProxyService:
 
     _cached_proxies: List[Dict[str, Any]] = []
     _cache_fetched_at: float = 0.0
+    _blacklisted_proxies: set = set()  # IPs that got 403/blocked — skip these during rotation
 
     @classmethod
     async def _fetch_proxies(cls, force_refresh: bool = False) -> List[Dict[str, Any]]:
@@ -210,13 +211,24 @@ class ProxyService:
                 "password": password,
             }
 
-        # Shuffle pool and try proxies until one works against target_url
+        # Clear blacklist if it's too large (prevents accumulation over time)
+        if len(cls._blacklisted_proxies) > 50:
+            logger.info(f"🧹 Clearing proxy blacklist ({len(cls._blacklisted_proxies)} entries)")
+            cls._blacklisted_proxies.clear()
+
+        # Shuffle pool — skip blacklisted IPs first
         shuffled = proxies.copy()
         random.shuffle(shuffled)
-        check_url = target_url or "https://www.google.com"
-        max_verify_attempts = min(10, len(shuffled))
+        clean = [p for p in shuffled if p["proxy_address"] not in cls._blacklisted_proxies]
+        blocked_count = len(shuffled) - len(clean)
+        if blocked_count:
+            logger.info(f"🚫 Skipping {blocked_count} blacklisted proxy IPs, {len(clean)} candidates remaining")
+        candidates = clean if clean else shuffled  # fallback to all if blacklist consumed everything
 
-        for attempt, selected in enumerate(shuffled[:max_verify_attempts]):
+        check_url = target_url or "https://www.google.com"
+        max_verify_attempts = min(10, len(candidates))
+
+        for attempt, selected in enumerate(candidates[:max_verify_attempts]):
             host = selected["proxy_address"]
             port = selected["port"]
             username = selected["username"]
@@ -224,8 +236,8 @@ class ProxyService:
             server = f"http://{username}:{password}@{host}:{port}"
 
             try:
-                async with httpx.AsyncClient(proxy=server, timeout=8.0, follow_redirects=True) as client:
-                    resp = await client.get(check_url, timeout=8.0)
+                async with httpx.AsyncClient(proxy=server, timeout=6.0, follow_redirects=True) as client:
+                    resp = await client.get(check_url, timeout=6.0)
                     # Accept any non-403/non-5xx status as "reachable"
                     if resp.status_code not in (403, 500, 502, 503, 504):
                         logger.info(f"🔄 Proxy rotated → verified {host}:{port} (status={resp.status_code}) against {check_url}")
@@ -237,9 +249,10 @@ class ProxyService:
                             "port": port,
                         }
                     else:
-                        logger.warning(f"⚠️ Proxy {host}:{port} returned {resp.status_code} for {check_url}, trying next...")
+                        logger.warning(f"⚠️ Proxy {host}:{port} returned {resp.status_code} for {check_url} — blacklisting")
+                        cls._blacklisted_proxies.add(host)  # ← blacklist this IP
             except Exception as e:
-                logger.warning(f"⚠️ Proxy {host}:{port} failed verification: {e}. Trying next ({attempt + 1}/{max_verify_attempts})...")
+                logger.warning(f"⚠️ Proxy {host}:{port} failed: {e}. Trying next ({attempt + 1}/{max_verify_attempts})...")
                 continue
 
         # Fallback: use last candidate without verification

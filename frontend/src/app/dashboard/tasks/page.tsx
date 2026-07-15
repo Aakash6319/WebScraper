@@ -266,7 +266,6 @@ export default function TasksPage() {
       setPrompt('');
       setSessionId('');
       fetchTasks();
-      setSelectedTask(createdTask);
     } catch (err: any) {
       toast.error(err.message || 'Failed to create task');
     } finally {
