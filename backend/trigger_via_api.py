@@ -40,7 +40,7 @@ async def main():
     }
     
     payload = {
-        "prompt": "Go to linkedin.com, log in with email: aakashsolanki0928@gmail.com and password: En21cs301065, then search for \"Python Developer\" jobs in India, apply to a job using Easy Apply with these details - Name: Aakash Solanki, Phone: +91 9876543210, Experience: 3 years, Title: Python Developer. After applying, show the job title and company name.",
+        "prompt": "Go to https://portal.sealdynamics.com/IPFSitePages/Main.aspx, log in with user ID: 200178 and password: SeattleSD2023!, then search for part number 'dk120', and find its price.",
         "priority": 1,
         "max_retries": 2,
         "timeout_seconds": 600

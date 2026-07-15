@@ -100,7 +100,13 @@ OUTPUT FORMAT (JSON array of action objects):
 ]
 
 CRITICAL RULES:
-- NEVER generate brittle or dynamic CSS selectors (e.g. ids like `«Refvd3ksopa55j6»`, obfuscated class names).
+- NEVER generate generic CSS selectors like 'a', 'button', 'input', 'div', or 'span' for clicking/typing/hovering as they will match the wrong elements (e.g. screen reader skip links).
+- NEVER generate brittle or dynamic CSS selectors containing random GUIDs/hashes.
+- Construct specific, robust CSS selectors utilizing text content or unique attributes/partial matching. Examples:
+  * For a 'Search' button, use: `a:has-text("Search")` or `button:has-text("Search")`
+  * For a 'Sign in' link button with dynamic ID, use: `a[id*="_LoginButton"]` or `div[id*="_LoginButton"]`
+  * For a 'Submit' button, use: `button[type="submit"]` or `button:has-text("Submit")`
+  * For an input field with placeholder, use: `input[placeholder*="Search"]`
 - If starting on a landing page, check if the login inputs are directly visible; if not, you MUST generate a 'click' step to click the "Sign In" or "Log In" button/link first to navigate to the login form before typing credentials.
 - For login/auth forms, DO NOT include `selector` at all — write a clear `description` and let the agent resolve elements dynamically.
 - Only include `selector` for stable, semantic attributes like `data-testid`, `aria-label`, `[type='submit']`, or well-known IDs.
@@ -234,9 +240,12 @@ UNIVERSAL RULES (apply to ALL websites):
 • For Easy Apply / multi-step application modals: fill EACH visible field first, then click Next/Continue.
 
 [SELECTOR GUIDANCE]
-• Prefer semantic selectors: button[type="submit"], input[name="email"], [aria-label="Search"]
-• Use text-based selectors only as last resort
-• If selector fails → fall back to description-based DOM index resolution (leave selector empty)
+• NEVER use generic CSS selectors like 'a', 'button', 'input', 'div', or 'span' on their own for clicking, typing, or hovering (as they will match the first hidden skip-link or screen reader helper on the page).
+• Construct specific, robust CSS selectors utilizing text content, placeholders, or partial attribute matching. Examples:
+  - For a 'Sign in' button: use `a:has-text("Sign in")`, `div[id*="_LoginButton"]` or `a[id*="_LoginButton"]`
+  - For a 'Search' button: use `a:has-text("Search")` or `button:has-text("Search")`
+  - For an input search field: use `input[placeholder*="Search"]` or `input[name*="Search"]`
+• If a robust selector cannot be built, leave the selector empty to fall back to description-based DOM index resolution.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 IMPORTANT:
