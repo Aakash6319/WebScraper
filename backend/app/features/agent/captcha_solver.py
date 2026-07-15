@@ -901,12 +901,15 @@ class CaptchaSolver:
             logger.debug(f"Failed to query captchaSiteKey input: {ex}")
             
         use_sitekey = input_sitekey or sitekey
-        # Use ReCaptchaV2Task/ReCaptchaV2TaskProxyLess if we are using the legacy sitekey (which is normal v2),
-        # or ReCaptchaV2EnterpriseTask if it is the new enterprise sitekey
-        is_enterprise = captcha_info.get("enterprise")
-        if input_sitekey and input_sitekey != sitekey:
-            # If they differ, the legacy input sitekey is standard recaptcha, not enterprise
-            is_enterprise = False
+        # Determine enterprise flag:
+        # - If we are using the legacy input sitekey (LinkedIn-style), we DON'T know if it's enterprise
+        #   so we try enterprise first.
+        # - If the frame URL says enterprise, use enterprise.
+        is_enterprise = captcha_info.get("enterprise", False)
+        using_legacy_sitekey = bool(input_sitekey and input_sitekey != sitekey)
+        if using_legacy_sitekey:
+            # Legacy captchaSiteKey inputs on LinkedIn are typically enterprise reCAPTCHA
+            is_enterprise = True
 
         proxy_config = getattr(actual_page.context, "_proxy_config", None)
 
@@ -940,7 +943,9 @@ class CaptchaSolver:
                         "websiteURL": page_url,
                         "websiteKey": use_sitekey,
                     }
-            if captcha_type == "recaptcha_v2" and captcha_info.get("invisible"):
+            if captcha_type == "recaptcha_v2" and captcha_info.get("invisible") and not using_legacy_sitekey:
+                # Only set isInvisible for true invisible reCAPTCHAs, NOT for LinkedIn legacy sitekey overrides
+                # (LinkedIn checkpoint uses a visible challenge with a legacy sitekey — isInvisible causes API errors)
                 payload["isInvisible"] = True
             if captcha_type == "recaptcha_v3":
                 payload["pageAction"] = "verify"
@@ -949,6 +954,11 @@ class CaptchaSolver:
             if payload["type"] in ("ReCaptchaV2EnterpriseTask", "ReCaptchaV2Task"):
                 logger.info(f"Attempting proxy-based solve with CapSolver ({payload['type']})...")
                 token = await cls._solve_via_capsolver(capsolver_key, payload)
+                if not token and is_enterprise:
+                    # Try non-enterprise variant as fallback
+                    logger.warning("Enterprise proxy-based solve failed, trying non-enterprise fallback...")
+                    fallback_payload = {**payload, "type": "ReCaptchaV2Task"}
+                    token = await cls._solve_via_capsolver(capsolver_key, fallback_payload)
                 if not token:
                     logger.warning("Proxy-based solve failed, falling back to ProxyLess...")
             
@@ -958,10 +968,15 @@ class CaptchaSolver:
                     "websiteURL": page_url,
                     "websiteKey": use_sitekey,
                 }
-                if captcha_type == "recaptcha_v2" and captcha_info.get("invisible"):
+                if captcha_type == "recaptcha_v2" and captcha_info.get("invisible") and not using_legacy_sitekey:
                     proxyless_payload["isInvisible"] = True
                 logger.info(f"Attempting ProxyLess solve with CapSolver ({proxyless_payload['type']})...")
                 token = await cls._solve_via_capsolver(capsolver_key, proxyless_payload)
+                if not token and is_enterprise:
+                    # Try non-enterprise proxyless as final fallback
+                    logger.warning("Enterprise proxyless solve failed, trying non-enterprise proxyless fallback...")
+                    fallback_proxyless = {**proxyless_payload, "type": "ReCaptchaV2TaskProxyLess"}
+                    token = await cls._solve_via_capsolver(capsolver_key, fallback_proxyless)
             if token:
                 injection_js = f"""
                     () => {{

@@ -404,6 +404,28 @@ class AgentService:
                 value = step.get("value")
                 description = step.get("description", f"Step {step_idx + 1}")
 
+                # ── Hard Loop Detection ─────────────────────────────────────
+                # If the same action+description has been executed 3+ times in a row, break the loop
+                if len(task.steps_executed) >= 3:
+                    recent = task.steps_executed[-3:]
+                    recent_descs = [s.get("description", "").lower() for s in recent]
+                    current_desc_lower = description.lower()
+                    if all(
+                        (current_desc_lower in d or d in current_desc_lower)
+                        for d in recent_descs
+                        if d
+                    ):
+                        logger.warning(f"🔁 Loop detected! Same action repeated 3+ times: '{description}'. Forcing scroll/next to break loop.")
+                        step = {
+                            "action": "scroll",
+                            "value": "500",
+                            "description": "Scroll down to break out of action loop and re-evaluate page state",
+                        }
+                        action = step["action"]
+                        selector = None
+                        value = step["value"]
+                        description = step["description"]
+
                 # If action is 'complete', LLM believes task is finished
                 if action == "complete":
                     logger.success(f"🏁 Dynamic task completion signal received: {description}")

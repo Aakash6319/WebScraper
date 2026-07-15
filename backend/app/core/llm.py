@@ -182,7 +182,9 @@ LINKEDIN-SPECIFIC RULES:
 - If you see a "Sign In" modal or "contextual-sign-in-modal" blocking the page, it means you are on a PUBLIC page. Navigate away to the logged-in job search URL instead.
 - NEVER try to click an Apply button on a public linkedin.com/jobs/view/ page — these require login and will always show a blocking modal.
 - After login and CAPTCHA solving, verify you are logged in by checking the URL does NOT contain "checkpoint" or "challenge".
-- Prefer "Easy Apply" button (LinkedIn's built-in form) over external "Apply" buttons that open other websites.
+- EASY APPLY DETECTION: Before trying to apply, FIRST check if the job details panel shows an "Easy Apply" button (it has a lightning bolt icon and says "Easy Apply"). If you only see a regular "Apply" button (which opens an external site), that job does NOT have Easy Apply.
+- SKIP TO NEXT JOB: If a job does NOT have an "Easy Apply" button, do NOT click "Apply" — instead click on the NEXT job listing in the left panel to check if it has Easy Apply. Keep scanning jobs until you find one with "Easy Apply".
+- EASY APPLY LOOP PREVENTION: If you have clicked "Easy Apply" or "Apply" on the same job MORE THAN 2 TIMES in your history and the Easy Apply modal/form has NOT appeared, that job does not support Easy Apply. Immediately click on the next job in the left panel list.
 - For Easy Apply forms: fill each field (phone, years of experience, etc.) using professional values for Aakash Solanki (Python developer, 3+ years experience, based in India).
 - If a LinkedIn "Easy Apply" modal opens, work through it step by step: fill fields, click "Next", fill more fields, click "Review", then "Submit application".
 """
