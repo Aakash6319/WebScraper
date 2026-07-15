@@ -1388,6 +1388,326 @@ git push
 
 ---
 
-*Total sections: 24. This document is your complete operating manual.*
-*Part 0 = HOW to think. Parts 1-24 = WHAT to know.*
+*Total sections: 25. This document is your complete operating manual.*
+*Part 0 = HOW to think. Parts 1-25 = WHAT to know.*
 *Read Part 0 first. Always.*
+
+---
+
+# ═══════════════════════════════════════════
+# PART 25 — WORKING WITH OTHER AGENTS
+# (Multi-Agent Collaboration Guide)
+# ═══════════════════════════════════════════
+
+This section explains how YOU (the developer agent) work WITH other AI agents —
+both receiving work FROM them and handing work OFF to them.
+
+---
+
+## 25.1 — THE TWO TYPES OF AGENTS IN THIS PROJECT
+
+```
+TYPE 1: DEVELOPER AGENT (that's you reading this)
+    Role: Fix bugs, add features, edit code, deploy, verify
+    Tools: Read files, write files, run terminal commands, docker
+    Triggered by: User saying "fix X", "add Y", "why is Z broken?"
+
+TYPE 2: BROWSER AUTOMATION AGENT (the one inside execute_task())
+    Role: Control a real browser to complete user tasks
+    "Tools": navigate, click, type, scroll, extract, solve_captcha
+    Triggered by: User submitting a task prompt on the frontend
+    Brain: DeepSeek LLM via get_next_action() in llm.py
+```
+
+These two agents are completely separate. You (Type 1) write the code that
+Type 2 runs. Type 2 never writes code. Type 1 never controls a browser directly.
+
+---
+
+## 25.2 — HOW TO RECEIVE A HANDOFF (you are the NEW agent)
+
+When you receive this document, you are picking up work from a previous developer agent.
+
+### What to do FIRST (before touching anything):
+
+```
+STEP 1: Read Part 0 of this document (the thinking rules)
+STEP 2: Read Part 13 (bugs fixed) — understand what was done, don't undo it
+STEP 3: Read Part 15 (open issues) — understand what still needs work
+STEP 4: Check the current state of the system:
+         curl http://localhost:8000/health
+         docker logs autowebagent-backend 2>&1 | tail -30
+STEP 5: Ask the user what they want to work on today
+STEP 6: Only then start working
+```
+
+### Common mistakes new agents make (don't do these):
+```
+❌ Starting to code immediately without reading the handoff
+❌ Re-implementing something that was already fixed
+❌ Reverting a bug fix because you don't understand why it's there
+❌ Asking "what does this project do?" — read this document
+❌ Hardcoding user data in llm.py (it was removed intentionally — see Part 4)
+❌ Setting isInvisible=True for ALL CAPTCHAs (see Part 6 — LinkedIn bug)
+❌ Using docker compose up --build for a simple .py file change (3 min wasted each time)
+```
+
+---
+
+## 25.3 — HOW TO GIVE A HANDOFF (you are leaving, another agent continues)
+
+When you finish a session and a new agent will continue:
+
+### Step 1 — Update this document
+Add any new bugs you fixed to Part 13 (Bugs Fixed table).
+Add any new open issues to Part 15 (Open Issues).
+Add any new patterns or conventions you established to Part 16 (Coding Rules).
+
+### Step 2 — Leave clear state
+```bash
+# Make sure code is deployed and working:
+docker ps  # all containers running?
+curl http://localhost:8000/health  # everything healthy?
+
+# Make sure changes are committed:
+git status  # no uncommitted changes
+git log --oneline -5  # last 5 commits look correct?
+```
+
+### Step 3 — Write a brief state summary at the TOP of this doc
+Add a section like this at the very top (after the title):
+
+```markdown
+## ⚡ CURRENT STATE (Last updated: [date] by [agent])
+- What was working: [X, Y, Z]
+- What was just fixed: [bug A, bug B]  
+- What the user wanted next: [feature X]
+- Known issue to be aware of: [thing to watch out for]
+- Last successful task tested: [task description]
+```
+
+---
+
+## 25.4 — HOW THE BROWSER AGENT WORKS (Type 2 — the one you build)
+
+Understanding this helps you debug and improve it.
+
+### The Browser Agent's "world":
+```
+It sees:    Current page URL, page title, DOM elements as numbered text
+It knows:   The task goal, previous actions taken
+It decides: One action at a time (JSON: {action, selector, value, description})
+It cannot:  Remember across tasks, learn from experience, write code
+```
+
+### The Browser Agent's decision cycle (every step):
+```
+PERCEIVE:
+    → What URL am I on?
+    → What elements are visible?
+    → What have I already done?
+    → Is there a popup/CAPTCHA blocking me?
+
+THINK:
+    → What is my goal?
+    → What is the closest next step?
+    → What could be blocking me?
+
+ACT:
+    → Output one JSON action
+    → Execute it
+    → Observe result
+    → Repeat
+```
+
+### How YOU (developer agent) can make the Browser Agent smarter:
+
+```
+Better DOM parsing → agent sees more/better elements → makes better decisions
+    File: dom_parser.py
+
+Better system prompt → agent reasons better → fewer loops, better decisions
+    File: core/llm.py → get_next_action() → system_prompt
+
+Better loop detection → agent breaks out of stuck states faster
+    File: agent/service.py → LOOP DETECTION section
+
+Better action execution → clicks work more reliably
+    File: agent/service.py → _execute_action()
+
+Better CAPTCHA solving → fewer task failures
+    File: agent/captcha_solver.py
+```
+
+---
+
+## 25.5 — COMMUNICATION PATTERNS BETWEEN AGENTS
+
+### Pattern 1: Sequential Handoff (most common)
+```
+Agent A works → finishes → updates AGENT_HANDOFF.md → Agent B reads → continues
+
+Example:
+    Agent A: "Fixed CAPTCHA isInvisible bug, added proxy blacklist"
+    Agent A: Updates Part 13 and Part 15 in this doc
+    Agent A: Commits and pushes
+    Agent B: Reads this doc, sees what was done, continues with open issues
+```
+
+### Pattern 2: User as Intermediary
+```
+User describes what happened to Agent A
+    ↓
+User copies the description and tells Agent B
+    ↓
+Agent B does NOT need to re-read logs from Agent A's session
+
+This is why the handoff doc exists — so the user doesn't have to
+explain the whole project every time a new agent starts.
+```
+
+### Pattern 3: Parallel Work (rare — avoid conflicts)
+```
+If two agents are working on the SAME codebase at the same time:
+    → They MUST work on different files
+    → Never edit the same file in parallel (merge conflicts)
+    → Agree on who owns which file before starting
+
+Safe parallel split:
+    Agent A: backend (service.py, captcha_solver.py)
+    Agent B: frontend (page.tsx, UI changes)
+```
+
+---
+
+## 25.6 — HOW TO UNDERSTAND WHAT THE PREVIOUS AGENT DID
+
+If this document is not fully up to date, reconstruct history from git:
+
+```bash
+# See all recent commits:
+git log --oneline -20
+
+# See what changed in a specific commit:
+git show <commit-hash>
+
+# See what changed in last 5 commits (full diff):
+git diff HEAD~5 HEAD
+
+# Find when a specific file was last changed:
+git log --oneline -- backend/app/core/llm.py
+
+# See who changed a specific line:
+git blame backend/app/features/agent/service.py | grep "isInvisible"
+```
+
+---
+
+## 25.7 — HOW TO TEST THAT THE PREVIOUS AGENT'S WORK IS STILL WORKING
+
+Before adding new features, verify the system is in a known-good state:
+
+```bash
+# 1. All containers up?
+docker ps
+
+# 2. No errors in recent logs?
+docker logs autowebagent-backend 2>&1 | grep -iE "(error|exception|failed)" | tail -20
+
+# 3. Health check passing?
+curl http://localhost:8000/health
+
+# 4. Run a simple test task (no login required):
+# Go to frontend → Create task:
+# "Go to https://httpbin.org/html, find the heading text, and display it."
+# This tests: navigate, DOM parse, extract, complete — without proxy/CAPTCHA
+```
+
+---
+
+## 25.8 — THE AGENT'S KNOWLEDGE vs YOUR KNOWLEDGE
+
+```
+BROWSER AGENT knows:
+    ✅ How to interact with a web page
+    ✅ What the current page shows
+    ✅ What actions were taken before
+    ❌ Code logic
+    ❌ Why something is broken
+    ❌ How to fix bugs
+    ❌ History beyond current task
+
+YOU (developer agent) know:
+    ✅ All of the above via this document
+    ✅ How to read and write code
+    ✅ How to run docker commands
+    ✅ How to debug from logs
+    ✅ The full project history
+    ❌ What's currently visible on the browser screen (you can only read logs/screenshots)
+```
+
+This is why debugging is done by reading logs, not by "watching" the browser.
+The screenshots saved in task.screenshots[] are your window into what the agent saw.
+
+---
+
+## 25.9 — GOLDEN RULES FOR MULTI-AGENT WORK
+
+```
+1. READ BEFORE WRITING
+   Never write code in a project you haven't read this handoff for.
+
+2. LEAVE IT BETTER THAN YOU FOUND IT
+   Fix at least one thing every session. Update this doc with what you fixed.
+
+3. DON'T BREAK EXISTING TESTS
+   Run a simple task after every change to confirm nothing broke.
+
+4. ONE AGENT, ONE RESPONSIBILITY
+   If you're fixing a bug, fix THAT bug. Don't refactor unrelated code.
+   If you're adding a feature, add THAT feature. Don't fix bugs while at it.
+   (Unless the bug is directly in your path — then fix it and note it clearly)
+
+5. COMMUNICATE THROUGH CODE AND DOCS
+   Other agents can't read your mind. Leave comments in code for non-obvious logic.
+   Update this document with anything that would confuse the next agent.
+
+6. TRUST BUT VERIFY
+   If this document says "Bug X was fixed" — verify it before assuming it works.
+   The document could be stale. The code is the truth.
+```
+
+---
+
+## 25.10 — EXAMPLE: FULL HANDOFF WORKFLOW
+
+Here's what a perfect handoff looks like:
+
+**Agent A ends their session:**
+```
+1. Agent A committed: "fix: add proxy blacklist to prevent blocked IP reuse"
+2. Agent A committed: "feat: auto-retry failed tasks up to 3 times"
+3. Agent A committed: "feat: rich health check endpoint"
+4. Agent A updated AGENT_HANDOFF.md:
+   - Added bugs to Part 13
+   - Removed completed items from Part 15
+   - Added state summary at top of doc
+5. Agent A pushed everything: git push
+```
+
+**Agent B starts their session:**
+```
+1. Agent B reads AGENT_HANDOFF.md from top
+2. Agent B reads Part 0 (behavior rules) — internalizes them
+3. Agent B reads the state summary at the top
+4. Agent B checks system: docker ps, curl /health
+5. Agent B asks user: "What should I work on today?"
+6. User says: "LinkedIn Easy Apply still not working"
+7. Agent B looks at Part 15 — "LinkedIn Easy Apply: agent skips to next job" is listed
+8. Agent B starts working on THAT issue
+9. Agent B follows Part 0 process: read logs → root cause → fix → deploy → verify
+```
+
+This is how agents collaborate effectively even without real-time communication.
+
+---
