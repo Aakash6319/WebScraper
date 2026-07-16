@@ -153,6 +153,7 @@ CRITICAL RULES:
         page_title: str,
         dom_tree: str,
         history: list[dict],
+        page_text: str = "",
     ) -> str:
         """
         Generate the single next best action object for the agent based on current page state and history.
@@ -247,14 +248,41 @@ UNIVERSAL RULES (apply to ALL websites):
   - For an input search field: use `input[placeholder*="Search"]` or `input[name*="Search"]`
 • If a robust selector cannot be built, leave the selector empty to fall back to description-based DOM index resolution.
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-IMPORTANT:
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-• All user credentials, names, emails, and task-specific data are in the OVERALL GOAL text — read it carefully.
-• Never invent data. Never hardcode assumptions. Everything you need is in the goal.
-• Act like a human: one action at a time, observe result, then decide next.
-"""
+	[LOGIN & AUTHENTICATION — SMART DETECTION]
+	• Login buttons come in many forms: `<a>Sign In</a>`, `<button>Sign In / Register</button>`, `<span>Login</span>` — click whichever is in the HEADER/TOP-BAR area, NOT the one in page content/hero banners.
+	• If clicking a login button redirects you to a DIFFERENT domain (e.g., `login.site.com`, `auth.site.com`, `*.microsoft.com`, `*.azure.com`) → this is an OAuth/SSO flow. Do NOT panic. The current page IS the login page — find email/password fields there and fill them.
+	• Multi-step login (common with Microsoft/Azure): enter email → click "Next" → enter password → click "Sign In". Handle each step sequentially.
+	• If 2FA (two-factor authentication) is required: click "Email code" or "Send code", then wait for user input (the code will be provided). After entering the code, click "Verify".
+	• After completing the OAuth flow (clicking "Yes" or "Stay signed in") → DO NOT manually navigate anywhere! The OAuth provider will AUTOMATICALLY redirect you back to the original site. Just WAIT (use wait action for 5-8 seconds) for the redirect to complete. If you manually navigate, you will LOSE the login session.
+	• When you land back on the original site after OAuth, the page header may still show "Sign In" for a few seconds while the session initializes. DO NOT click "Sign In" again! Just WAIT another 3-5 seconds — the session will settle and the header will update to show the account name. Clicking "Sign In" during this window will DESTROY the session.
+	• After login, if redirected back to the original site, a COOKIE consent popup may appear. Dismiss it before doing anything else.
+	• If the login form has a "Sign In" button that looks like it submits the form — it may be the submit button, not a navigation link. Distinguish between login-page-submit-buttons and navigation-login-links.
+	• After you click "Sign In", "Login", "Submit" or similar submit buttons, the page may reload. ALWAYS check whether login ACTUALLY succeeded:
+	    - If the URL still contains "login", "signin", or "sign_in" → login FAILED, you are still on the login page.
+	    - If the URL is the site homepage (just "/" with no "account", "dashboard", "my-account", "profile" in the path) → login FAILED, you were redirected back.
+	    - If the PAGE TEXT contains "reCAPTCHA verification failed", "Something went wrong with reCAPTCHA", "Invalid login or password", "Incorrect CAPTCHA", "The CAPTCHA verification failed", or similar error messages → login FAILED.
+	    - If the PAGE TEXT contains "Welcome", "Sign In", "Login", "Create an Account" and you just tried to log in → you are NOT logged in, login FAILED.
+	• NEVER assume login succeeded just because the page loaded or changed. Verify by checking the URL and page text for signs of being logged in (account name, "My Account", "Log Out", dashboard elements).
+	• If login FAILED: go back to the login page, re-fill credentials, re-solve CAPTCHA, and try again. Do NOT navigate away to search for products or perform post-login tasks.
+	• If you see "reCAPTCHA verification failed" in the page text → the CAPTCHA token was rejected by the server. You MUST re-solve the CAPTCHA and submit again. Do NOT ignore this and move on.
+	
+	━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+	IMPORTANT:
+	━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+	• All user credentials, names, emails, and task-specific data are in the OVERALL GOAL text — read it carefully.
+	• Never invent data. Never hardcode assumptions. Everything you need is in the goal.
+	• Act like a human: one action at a time, observe result, then decide next.
+	"""
 
+        # Truncate page text to avoid blowing context window
+        page_text_section = ""
+        if page_text and page_text.strip():
+            truncated = page_text.strip()[:2500]
+            page_text_section = f"""
+PAGE TEXT CONTENT (visible text on current page):
+{truncated}
+"""
+        
         user_content = f"""━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 OVERALL GOAL:
 {task_prompt}
@@ -263,7 +291,7 @@ OVERALL GOAL:
 CURRENT PAGE:
 • URL:   {page_url}
 • Title: {page_title}
-
+{page_text_section}
 INTERACTIVE ELEMENTS:
 {dom_tree}
 

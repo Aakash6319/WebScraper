@@ -46,6 +46,95 @@ class AgentService:
     6. Extract results and persist
     """
 
+    @staticmethod
+    async def _accept_cookies(page) -> bool:
+        """
+        Accept cookie consent popups (OneTrust + generic).
+        Returns True if a cookie dialog was found and accepted/closed.
+        Call this multiple times — cookie popups often appear with a delay.
+        """
+        try:
+            # Quick check: is any cookie dialog visible?
+            has_dialog = await page.evaluate("""
+                () => {
+                    const ot = document.querySelector('#onetrust-consent-sdk');
+                    if (ot && ot.offsetParent !== null) return true;
+                    const banners = document.querySelectorAll(
+                        '[id*="cookie" i], [class*="cookie" i], [id*="consent" i], [class*="consent" i], [aria-label*="cookie" i]'
+                    );
+                    for (const b of banners) {
+                        if (b.offsetParent !== null) return true;
+                    }
+                    return false;
+                }
+            """)
+            if not has_dialog:
+                return False
+
+            await asyncio.sleep(0.3)  # let dialog fully render
+
+            # ── Pass 1: ACCEPT buttons ──
+            accept_selectors = [
+                "#accept-recommended-btn-handler",
+                "#onetrust-accept-btn-handler",
+                "button:has-text('Allow All')",
+                "button:has-text('Accept All Cookies')",
+                "button:has-text('Accept All')",
+                "button:has-text('Accept Cookies')",
+                "button:has-text('I Accept')",
+                "button:has-text('I Agree')",
+                "button:has-text('Accept')",
+                "a:has-text('Accept')",
+                "button:has-text('Agree')",
+                "button:has-text('Allow')",
+                "button:has-text('Got it')",
+                "button:has-text('OK')",
+                ".cc-btn.cc-allow",
+                "button[aria-label*='accept' i]",
+                "button[aria-label*='allow' i]",
+                ".save-preference-btn-handler",
+                "button:has-text('Confirm My Choices')",
+                "button:has-text('Save')",
+            ]
+            for css in accept_selectors:
+                try:
+                    btn = page.locator(css).first
+                    if await btn.is_visible(timeout=300):
+                        label = (await btn.inner_text()).strip()[:40]
+                        logger.info(f"🍪 ACCEPTING cookie popup: '{label}' via {css}")
+                        await btn.click(force=True, timeout=3000)
+                        await asyncio.sleep(0.8)
+                        return True
+                except Exception:
+                    continue
+
+            # ── Pass 2: CLOSE buttons (last resort) ──
+            close_selectors = [
+                "#close-pc-btn-handler",
+                "button[aria-label*='close' i]",
+                "button:has-text('Close')",
+                "button:has-text('Reject All')",
+                "button:has-text('Decline')",
+                "button:has-text('No Thanks')",
+                "button:has-text('Necessary Only')",
+            ]
+            for css in close_selectors:
+                try:
+                    btn = page.locator(css).first
+                    if await btn.is_visible(timeout=300):
+                        label = (await btn.inner_text()).strip()[:40]
+                        logger.info(f"🍪 Closing cookie popup (no accept found): '{label}' via {css}")
+                        await btn.click(force=True, timeout=3000)
+                        await asyncio.sleep(0.8)
+                        return True
+                except Exception:
+                    continue
+
+            return False
+        except Exception as e:
+            logger.debug(f"Cookie accept check error: {e}")
+            return False
+
     @classmethod
     async def execute_task(cls, task_id: str, user_id: str) -> None:
         """
@@ -105,6 +194,100 @@ class AgentService:
             context = SessionService.get_context(session_id)
             page = await context.new_page()
 
+            # Intercept grecaptcha functions on page creation (New Document load)
+            await page.add_init_script("""
+                window.__bot_widget_ids = {};
+                window.__bot_token = '';
+                
+                let rawGrecaptcha = window.grecaptcha;
+                
+                function wrapGrecaptcha(val) {
+                    if (!val || typeof val !== 'object' || val.__is_bot_proxy) return val;
+                    
+                    return new Proxy(val, {
+                        get: function(target, prop, receiver) {
+                            if (prop === '__is_bot_proxy') return true;
+                            
+                            if (prop === 'render') {
+                                const origRender = target[prop];
+                                if (typeof origRender === 'function') {
+                                    return function(container, config) {
+                                        console.log('[Bot] grecaptcha.render called with config:', config);
+                                        const widgetId = origRender.apply(this, arguments);
+                                        window.__bot_widget_ids[widgetId] = config;
+                                        
+                                        // If we already have the token, trigger callback immediately
+                                        if (window.__bot_token && typeof config.callback === 'function') {
+                                            setTimeout(function() { config.callback(window.__bot_token); }, 200);
+                                        }
+                                        return widgetId;
+                                    };
+                                }
+                            }
+                            
+                            if (prop === 'execute') {
+                                const origExecute = target[prop];
+                                return function(widgetId) {
+                                    console.log('[Bot] grecaptcha.execute(' + widgetId + ') called');
+                                    if (window.__bot_token) {
+                                        var w = window.__bot_widget_ids[widgetId || 0];
+                                        if (w && typeof w.callback === 'function') {
+                                            setTimeout(function() { w.callback(window.__bot_token); }, 100);
+                                            return Promise.resolve(window.__bot_token);
+                                        }
+                                        // Also try ___grecaptcha_cfg
+                                        if (typeof ___grecaptcha_cfg !== 'undefined') {
+                                            var c = (___grecaptcha_cfg.clients || {})[widgetId || 0];
+                                            if (c) {
+                                                var cb = c.callback || c['callback'];
+                                                if (typeof cb === 'function') {
+                                                    setTimeout(function() { cb(window.__bot_token); }, 100);
+                                                    return Promise.resolve(window.__bot_token);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    if (typeof origExecute === 'function') {
+                                        return origExecute.apply(this, arguments);
+                                    }
+                                    return Promise.resolve(window.__bot_token || '');
+                                };
+                            }
+                            
+                            if (prop === 'getResponse') {
+                                const origGetResponse = target[prop];
+                                return function(widgetId) {
+                                    if (window.__bot_token) return window.__bot_token;
+                                    if (typeof origGetResponse === 'function') {
+                                        return origGetResponse.apply(this, arguments);
+                                    }
+                                    return '';
+                                };
+                            }
+                            
+                            if (prop === 'reset') {
+                                return function(widgetId) {
+                                    console.log('[Bot] grecaptcha.reset blocked');
+                                };
+                            }
+                            
+                            return Reflect.get(target, prop, receiver);
+                        }
+                    });
+                }
+                
+                if (rawGrecaptcha) {
+                    rawGrecaptcha = wrapGrecaptcha(rawGrecaptcha);
+                }
+                
+                Object.defineProperty(window, 'grecaptcha', {
+                    configurable: true,
+                    enumerable: true,
+                    get: function() { return rawGrecaptcha; },
+                    set: function(val) { rawGrecaptcha = wrapGrecaptcha(val); }
+                });
+            """)
+
             # ── Dynamic Step Planning & Execution Loop ───────
             logger.info(f"🧠 Initiating dynamic step-by-step agent loop for task {task_id}...")
 
@@ -163,8 +346,131 @@ class AgentService:
             # ── Anti-loop tracking ─────────────────────────────────────
             _recent_nav_urls: list[str] = []   # track last 5 navigate URLs
             _wait_scroll_streak: int = 0        # consecutive wait/scroll count
+            _was_on_oauth: bool = False          # track OAuth domain transitions
+            _oauth_return_time: float = 0.0       # timestamp when we returned from OAuth (block navigate for 45s)
 
             while step_idx < max_steps and not task_finished_successfully:
+                # 0a. ── Post-OAuth settle wait ──────────────────────────────
+                # When OAuth redirect lands back on the store, the SPA needs
+                # 3-8 seconds to initialize the session. If agent clicks "Sign In"
+                # during this window, it interrupts the session and discards it.
+                _oauth_keywords = [
+                    "customerlogin.", "login.microsoft", "login.live",
+                    "microsoftonline", "azure.com/oauth", "okta.com",
+                    "auth0.com", "onelogin.", "/sso/", "/idp/",
+                ]
+                _currently_on_oauth = any(kw in page.url.lower() for kw in _oauth_keywords)
+                if _was_on_oauth and not _currently_on_oauth:
+                    logger.info("🔄 Just returned from OAuth/SSO domain. Waiting 10s for session to initialize (SPA settle)...")
+                    _oauth_return_time = time.time()  # start 45s block window
+                    await asyncio.sleep(10)
+                    try:
+                        await page.wait_for_load_state("networkidle", timeout=10000)
+                    except Exception:
+                        pass
+                    # ── Re-check: is session actually loaded? ──
+                    # If header still shows "Sign In", session hasn't initialized yet — wait more
+                    # ALSO accept any cookie popup that appears during this wait
+                    for _retry in range(3):
+                        try:
+                            # ── Accept cookies during settle wait ──
+                            await cls._accept_cookies(page)
+
+                            page_text_check2 = await page.evaluate(
+                                "() => document.body ? document.body.innerText.toLowerCase() : ''"
+                            )
+                            still_shows_signin = (
+                                "sign in" in page_text_check2
+                                or "sign in / register" in page_text_check2
+                            ) and not any(
+                                kw in page_text_check2 for kw in [
+                                    "my account", "welcome", "log out", "sign out",
+                                    "my orders", "quick order", "order status"
+                                ]
+                            )
+                            if still_shows_signin:
+                                logger.info(f"⏳ Session still initializing (header shows 'Sign In'). Waiting 5s more (retry {_retry + 1}/3)...")
+                                await asyncio.sleep(5)
+                            else:
+                                break
+                        except Exception:
+                            break
+                    # ── Final cookie accept after settle ──
+                    await cls._accept_cookies(page)
+                    logger.info("✅ Post-OAuth settle complete. Session should be ready now.")
+                _was_on_oauth = _currently_on_oauth
+
+                # 0b. ACCEPT cookie consent popups (retry — they often load with delay)
+                try:
+                    for _cookie_retry in range(2):
+                        if await cls._accept_cookies(page):
+                            break
+                        await asyncio.sleep(1)  # short delay between retries
+                except Exception:
+                    pass
+
+                # 0b. Check if page shows reCAPTCHA verification failed — reload so agent retries login
+                try:
+                    page_text_check = await page.evaluate("() => document.body ? document.body.innerText.toLowerCase() : ''")
+                    current_url_check = page.url.lower()
+
+                    # Derive the login URL from the current origin (works for any Magento site)
+                    _login_url = "https://shop.aarcorp.com/customer/account/login"
+                    try:
+                        from urllib.parse import urlparse
+                        parsed = urlparse(page.url)
+                        origin = f"{parsed.scheme}://{parsed.netloc}"
+                        _login_url = f"{origin}/customer/account/login"
+                    except Exception:
+                        pass
+
+                    if ("recaptcha verification failed" in page_text_check or
+                            "something went wrong with recaptcha" in page_text_check):
+                        logger.warning("⚠️ reCAPTCHA verification failed on page. Reloading login page to retry...")
+                        await page.goto(_login_url, wait_until="networkidle", timeout=30000)
+                        await asyncio.sleep(3)
+
+                    # Detect if we landed on homepage after a login attempt (Magento redirect pattern)
+                    # Last step was a login click but we're not on an account page
+                    # ── BUT skip this check on OAuth/SSO domains (they naturally contain "login") ──
+                    _oauth_domains_0 = [
+                        "customerlogin.", "login.microsoft", "login.live",
+                        "microsoftonline", "azure.com", "oauth", "okta.com",
+                        "auth0.com", "onelogin.", "sso.", "idp.",
+                    ]
+                    _is_oauth_0 = any(d in current_url_check for d in _oauth_domains_0)
+                    if task.steps_executed and not _is_oauth_0:
+                        last_step = task.steps_executed[-1]
+                        last_desc = (last_step.get("description") or "").lower()
+                        last_action = last_step.get("action", "")
+                        was_login_attempt = (
+                            last_action == "click"
+                            and any(kw in last_desc for kw in ["sign in", "login", "log in", "submit", "signin"])
+                        )
+                        if was_login_attempt:
+                            # If we're on homepage (not account/dashboard) after login attempt → failed
+                            is_on_login_page = any(
+                                kw in current_url_check
+                                for kw in ["/login", "/signin", "sign_in", "/auth"]
+                            )
+                            is_on_homepage_root = (
+                                current_url_check.rstrip("/").endswith((".com", ".com/"))
+                                and not any(
+                                    kw in current_url_check
+                                    for kw in ["account", "dashboard", "my-account", "profile", "user", "checkout"]
+                                )
+                            )
+                            if is_on_login_page or is_on_homepage_root:
+                                logger.warning(
+                                    f"🔴 Step-0 detection: Login attempt failed — landed on "
+                                    f"{'login page' if is_on_login_page else 'homepage'} instead of account. "
+                                    f"Reloading login page to retry..."
+                                )
+                                await page.goto(_login_url, wait_until="networkidle", timeout=30000)
+                                await asyncio.sleep(3)
+                except Exception:
+                    pass
+
                 # 1. First scan and solve any CAPTCHA before doing any analysis or step decisions!
                 try:
                     captcha_detected = await CaptchaSolver.detect_captcha(page)
@@ -385,6 +691,15 @@ class AgentService:
                 current_url = page.url
                 current_title = await page.title()
 
+                # Extract page text so LLM can see error messages, status text, etc.
+                page_text = ""
+                try:
+                    page_text = await page.evaluate(
+                        "() => document.body ? document.body.innerText.substring(0, 3000) : ''"
+                    )
+                except Exception:
+                    pass
+
                 # Get the DOM tree of interactive elements
                 logger.info(f"🔍 [Step {step_idx + 1}] Capturing current DOM elements...")
                 elements = await PageAgentDOMParser.get_interactive_elements(page)
@@ -397,6 +712,7 @@ class AgentService:
                     page_title=current_title,
                     dom_tree=dom_tree[:8000],
                     history=task.steps_executed,
+                    page_text=page_text,
                 )
 
                 # Parse the dynamic action
@@ -416,6 +732,56 @@ class AgentService:
                 selector = step.get("selector")
                 value = step.get("value")
                 description = step.get("description", f"Step {step_idx + 1}")
+
+                # ── OAuth Navigate Blocker ────────────────────────────────────
+                # Block navigate + Sign In clicks for 45s after OAuth return.
+                # The SPA needs time to process the auth token and initialize session.
+                _oauth_domains_block = [
+                    "customerlogin.", "login.microsoft", "login.live",
+                    "microsoftonline", "azure.com/oauth", "okta.com",
+                    "auth0.com", "onelogin.", "/sso/", "/idp/", "login.",
+                ]
+                _oauth_block_active = (
+                    _oauth_return_time > 0
+                    and (time.time() - _oauth_return_time) < 45.0
+                )
+                _on_oauth_domain = any(d in page.url.lower() for d in _oauth_domains_block)
+                _should_block_navigate = _on_oauth_domain or _oauth_block_active
+
+                if _should_block_navigate and action == "navigate" and value:
+                    logger.warning(
+                        f"🛑 BLOCKED navigate "
+                        f"{'on OAuth domain' if _on_oauth_domain else f'post-OAuth ({(time.time() - _oauth_return_time):.0f}s since return)'}! "
+                        f"Agent tried '{value[:80]}' — replacing with wait"
+                    )
+                    step = {
+                        "action": "wait",
+                        "value": "6",
+                        "description": "WAIT for OAuth redirect/session settle — do NOT manually navigate!",
+                    }
+                    action = step["action"]
+                    selector = None
+                    value = step["value"]
+                    description = step["description"]
+
+                # ── Post-OAuth: Block "Sign In" clicks too ──────────────────
+                if action == "click" and _oauth_block_active:
+                    lower_desc_block = description.lower()
+                    if any(kw in lower_desc_block for kw in ["sign in", "login", "signin"]):
+                        logger.warning(
+                            f"🛑 BLOCKED 'Sign In' click post-OAuth "
+                            f"({(time.time() - _oauth_return_time):.0f}s since return)! "
+                            f"Session is still settling. Replacing with wait."
+                        )
+                        step = {
+                            "action": "wait",
+                            "value": "5",
+                            "description": "WAIT — session still initializing after OAuth. Do NOT click Sign In!",
+                        }
+                        action = step["action"]
+                        selector = None
+                        value = step["value"]
+                        description = step["description"]
 
                 # ── Hard Loop Detection ─────────────────────────────────────
                 # Strategy 1: URL-fingerprint loop — same navigate URL repeated 3+ times
@@ -531,6 +897,32 @@ class AgentService:
                                     except Exception as nav_err:
                                         logger.warning(f"Failed navigating back to {proxy_target_url} during retry: {nav_err}")
 
+                        # ── Pre-submit CAPTCHA solve (matching Selenium script order) ──
+                        # Working script: fill form FIRST → solve captcha → inject token → submit
+                        # Here we detect submit/login clicks and solve captcha right before clicking,
+                        # so the fresh token is injected just moments before form submission.
+                        lower_desc = (step_result.get("description", "") or "").lower()
+                        is_submit_click = action == "click" and any(
+                            kw in lower_desc for kw in ["sign in", "login", "log in", "submit", "signin"]
+                        )
+                        if is_submit_click and (anticaptcha_key or capsolver_key):
+                            try:
+                                pre_captcha = await CaptchaSolver.detect_captcha(page)
+                                if pre_captcha:
+                                    logger.info(f"🔐 Pre-submit CAPTCHA detected ({pre_captcha['type']}). Solving fresh token before click...")
+                                    pre_solved = await CaptchaSolver.handle_captcha_flow(
+                                        page,
+                                        anticaptcha_key=anticaptcha_key,
+                                        capsolver_key=capsolver_key,
+                                    )
+                                    if pre_solved:
+                                        logger.success("✅ Pre-submit CAPTCHA solved. Waiting 2s before clicking submit...")
+                                        await asyncio.sleep(2)
+                                    else:
+                                        logger.warning("⚠️ Pre-submit CAPTCHA solve failed. Proceeding with click anyway...")
+                            except Exception as pre_cap_ex:
+                                logger.warning(f"⚠️ Pre-submit CAPTCHA check failed: {pre_cap_ex}")
+
                         # Execute the action
                         result = await cls._execute_action(
                             page=page,
@@ -563,6 +955,129 @@ class AgentService:
                     task.screenshots = screenshots
                     await task.save()
                     return
+
+                # ── Post-submit validation: detect if login/submit actually failed ──
+                # After clicking "Sign In"/"Login"/"Submit", check if we landed on the
+                # wrong page (homepage or login page instead of account/dashboard).
+                # Magento and similar sites redirect away from the reCAPTCHA error page
+                # before our main-loop check can catch it, so we detect here instead.
+                if action == "click":
+                    lower_action_desc = description.lower()
+                    is_auth_click = any(
+                        kw in lower_action_desc
+                        for kw in ["sign in", "login", "log in", "submit", "signin"]
+                    )
+                    if is_auth_click:
+                        try:
+                            # Check if _execute_action already detected an immediate post-click error
+                            immediate_error = step_result.get("_post_click_error", False)
+                            
+                            post_url = page.url
+                            post_url_lower = post_url.lower()
+
+                            # If we are on a processing URL, wait for the redirect to settle
+                            if any(kw in post_url_lower for kw in ["/process", "/check", "/post", "/authenticate", "/submit"]):
+                                logger.info(f"⏳ On form processing URL: {post_url}. Waiting up to 10s for redirect to settle...")
+                                try:
+                                    # Wait for URL to change away from processing URL
+                                    await page.wait_for_function(
+                                        """
+                                        (processing_url) => window.location.href !== processing_url
+                                        """,
+                                        post_url,
+                                        timeout=10000
+                                    )
+                                    post_url = page.url
+                                    post_url_lower = post_url.lower()
+                                    logger.info(f"🔄 Page redirected to: {post_url}")
+                                except Exception:
+                                    logger.warning("Timeout waiting for processing URL to redirect.")
+                            
+                            # ── SKIP validation for OAuth/SSO external domains ──
+                            # These domains handle auth externally — "login" in their URL is NORMAL
+                            _oauth_domains = [
+                                "customerlogin.", "login.microsoft", "login.live",
+                                "microsoftonline", "azure.com", "oauth", "okta.com",
+                                "auth0.com", "onelogin.", "sso.", "idp.", "accounts.google",
+                                "appleid.apple", "facebook.com/login",
+                            ]
+                            _is_oauth_domain = any(d in post_url_lower for d in _oauth_domains)
+                            if _is_oauth_domain:
+                                logger.info(f"🔗 On OAuth/SSO domain ({post_url[:80]}...) — skipping post-submit login-failure check")
+                                # Don't run the validation below — proceed normally
+                            else:
+                                post_text = await page.evaluate(
+                                    "() => document.body ? document.body.innerText.substring(0, 2000).toLowerCase() : ''"
+                                )
+
+                                # Check 4: Page shows login/sign-in prompts (means NOT logged in)
+                                shows_login_prompts = (
+                                    "sign in" in post_text
+                                    or "create an account" in post_text
+                                    or "customer login" in post_text
+                                )
+
+                                # Check 1: Still on login/auth page → login failed
+                                still_on_login = any(
+                                    kw in post_url_lower
+                                    for kw in ["/login", "/signin", "sign_in", "/auth"]
+                                ) and not any(
+                                    kw in post_url_lower
+                                    for kw in ["/process", "/check", "/post", "/authenticate", "/submit"]
+                                )
+                                # Check 2: Redirected to homepage root (not account/dashboard) → login failed
+                                on_homepage = (
+                                    post_url_lower.rstrip("/").endswith((".com", ".com/"))
+                                    and not any(
+                                        kw in post_url_lower
+                                        for kw in ["account", "dashboard", "my-account", "profile", "user"]
+                                    )
+                                    and shows_login_prompts
+                                )
+                                # Check 3: Page text contains reCAPTCHA/error messages → login failed
+                                has_recaptcha_error = any(
+                                    kw in post_text
+                                    for kw in [
+                                        "recaptcha verification failed",
+                                        "something went wrong with recaptcha",
+                                        "recaptcha validation failed",
+                                        "invalid login",
+                                        "incorrect captcha",
+                                        "the captcha verification failed",
+                                    ]
+                                )
+
+                                if immediate_error or still_on_login or on_homepage or has_recaptcha_error:
+                                    logger.warning(
+                                        f"🔴 POST-SUBMIT FAILURE DETECTED: "
+                                        f"immediate_error={immediate_error}, still_on_login={still_on_login}, on_homepage={on_homepage}, "
+                                        f"has_recaptcha_error={has_recaptcha_error}, shows_login_prompts={shows_login_prompts}"
+                                    )
+                                    # Inject a synthetic failure step so the LLM knows login failed
+                                    failure_note = {
+                                        "step": step_idx + 2,  # next logical step
+                                        "action": "detection",
+                                        "description": (
+                                            "⚠️ LOGIN FAILED — reCAPTCHA token was rejected or login was unsuccessful. "
+                                            "Current page URL is still a login/home page, not an account dashboard. "
+                                            "You MUST go back to the login page, re-fill credentials, solve CAPTCHA "
+                                            "freshly, and click Sign In again. Do NOT navigate to search for products."
+                                        ),
+                                        "success": False,
+                                        "error": "Login failed: reCAPTCHA token rejected by server or invalid credentials.",
+                                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                                    }
+                                    # Append the original step + the failure note
+                                    task.steps_executed.append(step_result)
+                                    task.steps_executed.append(failure_note)
+                                    task.screenshots = screenshots
+                                    await task.save()
+                                    step_idx += 2  # skip ahead to account for both steps
+                                    await StealthManager.random_delay(1000, 2000)
+                                    continue  # go to next loop iteration — LLM will see the failure
+
+                        except Exception as post_check_ex:
+                            logger.debug(f"Post-submit validation check failed: {post_check_ex}")
 
                 task.steps_executed.append(step_result)
                 task.screenshots = screenshots
@@ -808,7 +1323,43 @@ class AgentService:
 
             # ── Post-click settle wait for login/form submits ──
             lower_desc = description.lower()
-            if any(kw in lower_desc for kw in ["submit", "sign in", "login", "verify", "continue", "next", "confirm", "send"]):
+            if any(kw in lower_desc for kw in ["submit", "sign in", "login", "verify", "continue", "next", "confirm", "send", "yes", "stay", "code"]):
+                # ── IMMEDIATE post-click error detection (before Magento redirects away) ──
+                # Magento shows "reCAPTCHA verification failed" momentarily then redirects.
+                # We must capture it RIGHT NOW, before the page changes.
+                try:
+                    await asyncio.sleep(0.5)  # tiny delay to let error page start rendering
+                    instant_url = page.url
+                    instant_text = await page.evaluate(
+                        "() => document.body ? document.body.innerText.substring(0, 2000).toLowerCase() : ''"
+                    )
+                    has_instant_error = any(
+                        kw in instant_text for kw in [
+                            "recaptcha verification failed",
+                            "something went wrong with recaptcha",
+                            "recaptcha validation failed",
+                            "invalid login or password",
+                            "incorrect captcha",
+                            "the captcha verification failed",
+                        ]
+                    )
+                    instant_url_lower = instant_url.lower()
+                    still_on_login = any(
+                        kw in instant_url_lower
+                        for kw in ["/login", "/signin", "sign_in", "/auth"]
+                    )
+                    if has_instant_error or still_on_login:
+                        logger.warning(
+                            f"🔴 IMMEDIATE POST-CLICK ERROR DETECTED: "
+                            f"has_instant_error={has_instant_error}, still_on_login={still_on_login}, "
+                            f"url={instant_url[:100]}"
+                        )
+                        result["_post_click_error"] = True
+                        result["_post_click_url"] = instant_url
+                        result["_post_click_text_snippet"] = instant_text[:300]
+                except Exception as instant_ex:
+                    logger.debug(f"Immediate post-click error check failed: {instant_ex}")
+
                 logger.info("⏳ Critical click detected (submit/login/verify). Waiting 5s for page to settle and process session cookies...")
                 await asyncio.sleep(5)
                 try:

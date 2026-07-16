@@ -75,7 +75,7 @@ _DOM_SERIALIZER_JS = """
         if (role) description += `(role:${role})`;
         
         // Label: best available
-        let label = ariaLabel || placeholder || name || text || href;
+        let label = ariaLabel || placeholder || text || name || href;
         if (!label && ariaDescribedBy) {
             const descEl = document.getElementById(ariaDescribedBy.split(' ')[0]);
             if (descEl) label = (descEl.innerText || '').trim().substring(0, 60);

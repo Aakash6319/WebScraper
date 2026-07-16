@@ -189,7 +189,7 @@ class SessionService:
             webgl_renderer=fingerprint.get("webgl_renderer"),
             hardware_concurrency=fingerprint.get("hardware_concurrency", 8),
             device_memory=fingerprint.get("device_memory", 8),
-            proxy_ip=proxy_config.get("ip") if proxy_config else None,
+            proxy_ip=proxy_config.get("host") if proxy_config else None,
             proxy_country=data.proxy_country,
         )
 

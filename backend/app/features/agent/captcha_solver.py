@@ -143,6 +143,21 @@ class CaptchaSolver:
         Returns:
             None if no CAPTCHA detected, or dict with 'type', 'sitekey', 'url', etc.
         """
+        # Check page title/URL for Cloudflare challenge directly
+        try:
+            title = (await page.title() or "").lower()
+            if "just a moment..." in title or "checking your browser" in title:
+                logger.info("🔐 Detected Cloudflare challenge page via title")
+                return {
+                    "type": "cloudflare_challenge",
+                    "sitekey": None,
+                    "url": page.url,
+                    "selector": "page title",
+                    "target_frame": page.main_frame
+                }
+        except Exception:
+            pass
+
         # Check if the page is currently asking for Security Verification OTP instead of CAPTCHA
         try:
             page_text = await page.evaluate("() => document.body.innerText.toLowerCase()")
@@ -151,6 +166,51 @@ class CaptchaSolver:
                 return None
         except Exception:
             pass
+
+        # Delay CAPTCHA solving if there are empty visible login/form fields (e.g. email, password)
+        # to ensure the token doesn't expire before the form is filled.
+        # BUT: if the page shows reCAPTCHA verification failed, skip the delay and re-solve immediately.
+        try:
+            recaptcha_failed = await page.evaluate("""
+                () => {
+                    const text = document.body ? document.body.innerText.toLowerCase() : '';
+                    return text.includes('recaptcha verification failed') ||
+                           text.includes('something went wrong with recaptcha') ||
+                           text.includes('recaptcha validation failed');
+                }
+            """)
+            if recaptcha_failed:
+                logger.info("⚠️ reCAPTCHA verification failed detected on page. Forcing re-solve...")
+                # Don't return None here — fall through to detection/solve below
+            else:
+                has_empty_inputs = await page.evaluate("""
+                    () => {
+                        const inputs = Array.from(document.querySelectorAll('input[type="text"], input[type="email"], input[type="password"], input:not([type])'));
+                        for (const input of inputs) {
+                            const style = window.getComputedStyle(input);
+                            const isVisible = style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0' && input.offsetWidth > 0 && input.offsetHeight > 0;
+                            if (!isVisible) continue;
+                            if (input.readOnly || input.disabled) continue;
+                            
+                            const name = (input.name || '').toLowerCase();
+                            const id = (input.id || '').toLowerCase();
+                            const placeholder = (input.placeholder || '').toLowerCase();
+                            if (name.includes('search') || id.includes('search') || placeholder.includes('search')) {
+                                continue;
+                            }
+                            
+                            if (!input.value || input.value.trim() === '') {
+                                return true;
+                            }
+                        }
+                        return false;
+                    }
+                """)
+                if has_empty_inputs:
+                    logger.info("⏳ Empty login/form inputs detected on page. Delaying CAPTCHA solving until form is filled.")
+                    return None
+        except Exception as e:
+            logger.debug(f"Error checking for empty form inputs: {e}")
 
         try:
             # ── Check if CAPTCHA has already been solved/token-filled ──
@@ -542,41 +602,192 @@ class CaptchaSolver:
         solver.set_website_key(sitekey)
 
         # For invisible recaptcha
-        if captcha_info["type"] == "recaptcha_v3":
+        if captcha_info.get("invisible") or captcha_info["type"] == "recaptcha_v3":
             solver.set_is_invisible(True)
 
         start_time = time.time()
-        token = solver.solve_and_return_solution()
+        # Run synchronous solve in thread to prevent blocking event loop
+        token = await asyncio.to_thread(solver.solve_and_return_solution)
 
         if token:
             elapsed = (time.time() - start_time) * 1000
             logger.success(f"✅ reCAPTCHA solved in {elapsed:.0f}ms")
 
-            # Inject the token
-            await page.evaluate(f"""
+            # Robust Token Injection (similar to CapSolver route)
+            injection_js = f"""
                 () => {{
-                    const textarea = document.querySelector('#g-recaptcha-response');
-                    if (textarea) {{
+                    window.__bot_token = '{token}';
+                    // 1. Set the token value in any g-recaptcha-response textareas
+                    const textareas = document.querySelectorAll('textarea[name="g-recaptcha-response"], textarea[id*="g-recaptcha-response"], .g-recaptcha-response');
+                    for (const textarea of textareas) {{
                         textarea.value = '{token}';
                         textarea.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                        textarea.dispatchEvent(new Event('input', {{ bubbles: true }}));
                     }}
 
-                    // Try calling the callback if defined
+                    // 2. Set the token value in hidden response inputs (like LinkedIn's captchaUserResponseToken)
+                    const responseInputs = document.querySelectorAll('input[name="captchaUserResponseToken"]');
+                    for (const input of responseInputs) {{
+                        input.value = '{token}';
+                        input.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                        input.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                    }}
+
+                    // 3. Update legacy/hidden captchaSiteKey input to match the actual sitekey used to solve it
+                    const sitekeyInput = document.querySelector('input[name="captchaSiteKey"]');
+                    if (sitekeyInput) {{
+                        sitekeyInput.value = '{sitekey}';
+                        sitekeyInput.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                    }}
+
+                    // Intercept grecaptcha functions to prevent Magento 2 from triggering a fresh verification
+                    if (typeof grecaptcha !== 'undefined') {{
+                        if (!window.__bot_original_execute) {{
+                            window.__bot_original_execute = grecaptcha.execute;
+                            window.__bot_original_getResponse = grecaptcha.getResponse;
+                        }}
+                        
+                        grecaptcha.execute = function(widgetId) {{
+                            console.log('[Bot] grecaptcha.execute(' + widgetId + ') intercepted');
+                            if (window.__bot_widget_ids) {{
+                                Object.values(window.__bot_widget_ids).forEach(function(w) {{
+                                    if (w && typeof w.callback === 'function') {{
+                                        try {{ w.callback('{token}'); }} catch(e) {{}}
+                                    }}
+                                }});
+                            }}
+                            if (typeof ___grecaptcha_cfg !== 'undefined') {{
+                                const allClients = ___grecaptcha_cfg.clients || {{}};
+                                Object.keys(allClients).forEach(function(wid) {{
+                                    const c = allClients[wid];
+                                    const cb = c.callback || c['callback'];
+                                    if (typeof cb === 'function') {{
+                                        try {{ cb('{token}'); }} catch(e) {{}}
+                                    }}
+                                }});
+                            }}
+                            
+                            const globalCallbacks = ['recaptchaOnSubmit', 'onSubmit', 'onCaptchaSubmit', 'onCaptchaSuccess', 'captchaCallback', 'submitForm'];
+                            globalCallbacks.forEach(name => {{
+                                if (typeof window[name] === 'function') {{
+                                    try {{ window[name]('{token}'); }} catch(e) {{}}
+                                }}
+                            }});
+                            
+                            return {{ then: function(cb) {{ setTimeout(function() {{ cb('{token}'); }}, 50); }} }};
+                        }};
+                        
+                        grecaptcha.getResponse = function(widgetId) {{
+                            console.log('[Bot] grecaptcha.getResponse(' + widgetId + ') = token');
+                            return '{token}';
+                        }};
+                    }}
+
+                    // Magento/Form fallback: ensure g-recaptcha-response input is in form
+                    const forms = document.querySelectorAll('form');
+                    forms.forEach(form => {{
+                        let hiddenInput = form.querySelector('input[name="g-recaptcha-response"]');
+                        if (!hiddenInput) {{
+                            hiddenInput = document.createElement('input');
+                            hiddenInput.type = 'hidden';
+                            hiddenInput.name = 'g-recaptcha-response';
+                            form.appendChild(hiddenInput);
+                        }}
+                        hiddenInput.value = '{token}';
+                    }});
+
+                    // Trigger all stored callbacks in window.__bot_widget_ids directly
+                    if (window.__bot_widget_ids) {{
+                        Object.values(window.__bot_widget_ids).forEach(w => {{
+                            if (w && typeof w.callback === 'function') {{
+                                try {{ w.callback('{token}'); }} catch(e) {{}}
+                            }}
+                        }});
+                    }}
+
+                    // 4. Recursively find and invoke callback functions in ___grecaptcha_cfg
                     if (typeof ___grecaptcha_cfg !== 'undefined') {{
-                        const clients = ___grecaptcha_cfg.clients || {{}};
-                        for (const [id, client] of Object.entries(clients)) {{
-                            if (client.callback) {{
-                                try {{ client.callback('{token}'); }} catch(e) {{}}
+                        const visited = new Set();
+                        const findAndTriggerCallbacks = (obj, depth = 0) => {{
+                            if (depth > 12 || !obj || typeof obj !== 'object' || visited.has(obj)) return;
+                            visited.add(obj);
+                            
+                            for (const key in obj) {{
+                                try {{
+                                    if (key === 'callback' && typeof obj[key] === 'function') {{
+                                        obj[key]('{token}');
+                                    }} else if (obj[key] && typeof obj[key] === 'object') {{
+                                        findAndTriggerCallbacks(obj[key], depth + 1);
+                                    }}
+                                }} catch(e) {{}}
+                            }}
+                        }};
+                        
+                        if (___grecaptcha_cfg.clients) {{
+                            for (const [id, client] of Object.entries(___grecaptcha_cfg.clients)) {{
+                                findAndTriggerCallbacks(client);
                             }}
                         }}
                     }}
 
-                    // Also try window callback
-                    if (typeof recaptchaCallback === 'function') {{
-                        recaptchaCallback('{token}');
+                    // 5. Fallback to standard global callback functions
+                    const globalCallbacks = [
+                        'recaptchaOnSubmit',
+                        'onSubmit',
+                        'onCaptchaSubmit',
+                        'onCaptchaSuccess',
+                        'captchaCallback',
+                        'submitForm'
+                    ];
+                    let callbackTriggered = false;
+                    for (const cbName of globalCallbacks) {{
+                        if (typeof window[cbName] === 'function' && cbName !== 'recaptchaCallback') {{
+                            try {{
+                                window[cbName]('{token}');
+                                callbackTriggered = true;
+                                break;
+                            }} catch(e) {{}}
+                        }}
+                    }}
+
+                    if (!callbackTriggered && typeof recaptchaCallback === 'function') {{
+                        try {{
+                            recaptchaCallback('{token}');
+                        }} catch(e) {{
+                            try {{
+                                recaptchaCallback({{ preventDefault: () => {{}} }});
+                            }} catch(e2) {{}}
+                        }}
+                    }}
+
+                    // 6. Auto-submit form if it's a dedicated captcha challenge form
+                    const challengeForm = document.querySelector('form#captcha-challenge');
+                    if (challengeForm) {{
+                        let extraInput = challengeForm.querySelector('input[name="g-recaptcha-response"]');
+                        if (!extraInput) {{
+                            extraInput = document.createElement('input');
+                            extraInput.type = 'hidden';
+                            extraInput.name = 'g-recaptcha-response';
+                            challengeForm.appendChild(extraInput);
+                        }}
+                        extraInput.value = '{token}';
+                        challengeForm.submit();
                     }}
                 }}
-            """)
+            """
+
+            # Evaluate in main page with timeout
+            logger.debug("Evaluating injection_js on main page...")
+            await asyncio.wait_for(actual_page.evaluate(injection_js), timeout=10.0)
+
+            # Evaluate in all child frames as well with timeout
+            for frame in actual_page.frames:
+                try:
+                    if not frame.is_detached() and frame != actual_page.main_frame:
+                        logger.debug(f"Evaluating injection_js on child frame: {frame.url[:50]}")
+                        await asyncio.wait_for(frame.evaluate(injection_js), timeout=5.0)
+                except Exception as frame_ex:
+                    logger.debug(f"Frame evaluation skipped or failed: {frame_ex}")
 
             return token
 
@@ -707,27 +918,173 @@ class CaptchaSolver:
         """
         logger.info("⏳ Waiting for Cloudflare challenge to resolve...")
 
+        if api_key.startswith("CAP-"):
+            # Resolve proxy for AntiCloudflareTask
+            proxy_formatted = None
+            user_agent = None
+            html_content = None
+            
+            try:
+                user_agent = await page.evaluate("navigator.userAgent")
+                html_content = await page.content()
+            except Exception:
+                pass
+            
+            if not user_agent or "Windows" not in user_agent:
+                user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                
+            try:
+                from app.features.sessions.models import SessionDocument
+                from app.features.proxy.service import ProxyService
+                
+                session = await SessionDocument.find_one(SessionDocument.status == "active")
+                if session and session.proxy_ip:
+                    proxies = ProxyService._cached_proxies
+                    if not proxies:
+                        proxies = await ProxyService._fetch_proxies()
+                    
+                    selected_proxy = None
+                    for p in proxies:
+                        if p.get("proxy_address") == session.proxy_ip:
+                            selected_proxy = p
+                            break
+                            
+                    if selected_proxy:
+                        host = selected_proxy["proxy_address"]
+                        port = selected_proxy["port"]
+                        username = selected_proxy["username"]
+                        password = selected_proxy["password"]
+                        proxy_formatted = f"{host}:{port}:{username}:{password}"
+                        logger.info(f"🎯 Formatting session proxy for CapSolver: {host}:{port}")
+            except Exception as proxy_lookup_err:
+                logger.warning(f"Failed to lookup active session proxy: {proxy_lookup_err}")
+
+            proxy_options = []
+            if proxy_formatted:
+                proxy_options.append(("session", proxy_formatted))
+                
+            # Gather additional direct proxy candidates to handle connection failures
+            try:
+                from app.features.proxy.service import ProxyService
+                cached = ProxyService._cached_proxies
+                if not cached:
+                    cached = await ProxyService._fetch_proxies()
+                if cached:
+                    import random
+                    # Pick 5 random proxies to try as direct candidates
+                    candidates = random.sample(cached, min(len(cached), 5))
+                    for p in candidates:
+                        host = p["proxy_address"]
+                        port = p["port"]
+                        username = p["username"]
+                        password = p["password"]
+                        p_str = f"{host}:{port}:{username}:{password}"
+                        if p_str not in [x[1] for x in proxy_options]:
+                            proxy_options.append(("direct_candidate", p_str))
+            except Exception as e:
+                logger.warning(f"Failed to fetch additional direct proxy candidates: {e}")
+
+            from app.core.config import settings
+            if settings.WEBSHARE_PROXY_USERNAME and settings.WEBSHARE_PROXY_PASSWORD:
+                fallback_proxy = f"{settings.WEBSHARE_PROXY_HOST}:{settings.WEBSHARE_PROXY_PORT}:{settings.WEBSHARE_PROXY_USERNAME}:{settings.WEBSHARE_PROXY_PASSWORD}"
+                proxy_options.append(("fallback", fallback_proxy))
+
+            for p_type, p_str in proxy_options:
+                try:
+                    payload = {
+                        "type": "AntiCloudflareTask",
+                        "websiteURL": page.url,
+                        "proxy": p_str,
+                        "userAgent": user_agent,
+                        "html": html_content
+                    }
+                    logger.info(f"⚡ Solving Cloudflare challenge via CapSolver (AntiCloudflareTask) using {p_type} proxy...")
+                    cf_clearance = await cls._solve_via_capsolver(api_key, payload)
+                    if cf_clearance:
+                        logger.success(f"✅ CapSolver returned cf_clearance cookie using {p_type} proxy! Injecting cookie...")
+                        from urllib.parse import urlparse
+                        domain_parsed = urlparse(page.url).netloc
+                        cookie_domain = f".{domain_parsed}" if not domain_parsed.startswith(".") else domain_parsed
+                        
+                        await page.context.add_cookies([{
+                            "name": "cf_clearance",
+                            "value": cf_clearance,
+                            "domain": cookie_domain,
+                            "path": "/"
+                        }])
+                        
+                        logger.info("🔄 Reloading page to apply cf_clearance cookie...")
+                        await page.reload(wait_until="networkidle", timeout=30000)
+                        await asyncio.sleep(5)
+                        
+                        # Verify if passed
+                        title = (await page.title() or "").lower()
+                        if "just a moment" not in title and "checking your browser" not in title:
+                            logger.success("✅ Cloudflare challenge passed via CapSolver!")
+                            return "cf_challenge_passed"
+                except Exception as e:
+                    logger.error(f"Failed to solve Cloudflare challenge via CapSolver using {p_type} proxy: {e}")
+
         try:
-            # Wait for the challenge page to redirect (normally 5 seconds)
-            await page.wait_for_url(
-                lambda url: "challenges.cloudflare.com" not in url,
-                timeout=30000,
-            )
+            # Wait for the challenge page title to change (normally 5-10 seconds)
+            await page.wait_for_function("""
+                () => {
+                    const title = document.title.toLowerCase();
+                    return !title.includes('just a moment') && !title.includes('checking your browser');
+                }
+            """, timeout=15000)
             logger.success("✅ Cloudflare challenge passed automatically")
             return "cf_challenge_passed"
         except Exception:
-            logger.warning("Cloudflare challenge did not resolve automatically")
-            # Try clicking the "Verify you are human" checkbox if present
+            logger.warning("Cloudflare challenge did not resolve automatically, attempting to click checkbox...")
+            # Try clicking the "Verify you are human" checkbox if present inside any frame
+            for frame in page.frames:
+                try:
+                    checkbox = await frame.query_selector(
+                        'input[type="checkbox"], #challenge-stage, span.mark, .cb-i'
+                    )
+                    if checkbox:
+                        logger.info("Found Cloudflare Turnstile checkbox in frame. Clicking it...")
+                        await checkbox.click()
+                        await asyncio.sleep(8)
+                        
+                        # Verify if passed
+                        title = (await page.title() or "").lower()
+                        if "just a moment" not in title and "checking your browser" not in title:
+                            logger.success("✅ Cloudflare challenge passed after clicking checkbox")
+                            return "cf_challenge_clicked"
+                except Exception as click_err:
+                    logger.debug(f"Failed clicking checkbox in frame: {click_err}")
+                    
+            # If frame-based selector click failed, try coordinate-based click on the Turnstile iframe
             try:
-                checkbox = await page.query_selector(
-                    'input[type="checkbox"], .h-captcha-box, #challenge-stage'
-                )
-                if checkbox:
-                    await checkbox.click()
-                    await asyncio.sleep(5)
-                    return "cf_challenge_clicked"
-            except Exception:
-                pass
+                # 1. Print all frames URLs for debugging
+                all_frames_info = []
+                for idx, f in enumerate(page.frames):
+                    all_frames_info.append(f"Frame {idx}: name='{f.name}', url='{f.url}'")
+                logger.info(f"📊 Total page frames: {len(page.frames)}\n" + "\n".join(all_frames_info))
+
+                # 2. Find Turnstile frame directly from the frames list
+                for f in page.frames:
+                    if "challenges.cloudflare.com" in f.url or "challenge-platform" in f.url:
+                        logger.info(f"🎯 Found Turnstile frame: {f.url}. Resolving bounding box...")
+                        iframe_handle = await f.frame_element()
+                        if iframe_handle:
+                            box = await iframe_handle.bounding_box()
+                            if box:
+                                # Click near the checkbox (X=30, Y=32 inside the 300x65 widget)
+                                click_x = box["x"] + 30
+                                click_y = box["y"] + 32
+                                logger.info(f"👉 Clicking Cloudflare Turnstile iframe at coordinates: ({click_x}, {click_y}), box={box}")
+                                await page.mouse.click(click_x, click_y)
+                                await asyncio.sleep(8)
+                                
+                                title = (await page.title() or "").lower()
+                                if "just a moment" not in title and "checking your browser" not in title:
+                                    logger.success("✅ Cloudflare challenge passed after coordinates click")
+                                    return "cf_challenge_clicked"
+            except Exception as coord_err:
+                logger.warning(f"Coordinates click on Turnstile failed: {coord_err}")
             return None
 
     @classmethod
@@ -980,6 +1337,7 @@ class CaptchaSolver:
             if token:
                 injection_js = f"""
                     () => {{
+                        window.__bot_token = '{token}';
                         // 1. Set the token value in any g-recaptcha-response textareas
                         const textareas = document.querySelectorAll('textarea[name="g-recaptcha-response"], textarea[id*="g-recaptcha-response"], .g-recaptcha-response');
                         for (const textarea of textareas) {{
@@ -1001,6 +1359,71 @@ class CaptchaSolver:
                         if (sitekeyInput) {{
                             sitekeyInput.value = '{sitekey}';
                             sitekeyInput.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                        }}
+
+                        // Intercept grecaptcha functions to prevent Magento 2 from triggering a fresh verification
+                        if (typeof grecaptcha !== 'undefined') {{
+                            if (!window.__bot_original_execute) {{
+                                window.__bot_original_execute = grecaptcha.execute;
+                                window.__bot_original_getResponse = grecaptcha.getResponse;
+                            }}
+                            
+                            grecaptcha.execute = function(widgetId) {{
+                                console.log('[Bot] grecaptcha.execute(' + widgetId + ') intercepted');
+                                if (window.__bot_widget_ids) {{
+                                    Object.values(window.__bot_widget_ids).forEach(function(w) {{
+                                        if (w && typeof w.callback === 'function') {{
+                                            try {{ w.callback('{token}'); }} catch(e) {{}}
+                                        }}
+                                    }});
+                                }}
+                                if (typeof ___grecaptcha_cfg !== 'undefined') {{
+                                    const allClients = ___grecaptcha_cfg.clients || {{}};
+                                    Object.keys(allClients).forEach(function(wid) {{
+                                        const c = allClients[wid];
+                                        const cb = c.callback || c['callback'];
+                                        if (typeof cb === 'function') {{
+                                            try {{ cb('{token}'); }} catch(e) {{}}
+                                        }}
+                                    }});
+                                }}
+                                
+                                const globalCallbacks = ['recaptchaOnSubmit', 'onSubmit', 'onCaptchaSubmit', 'onCaptchaSuccess', 'captchaCallback', 'submitForm'];
+                                globalCallbacks.forEach(name => {{
+                                    if (typeof window[name] === 'function') {{
+                                        try {{ window[name]('{token}'); }} catch(e) {{}}
+                                    }}
+                                }});
+                                
+                                return {{ then: function(cb) {{ setTimeout(function() {{ cb('{token}'); }}, 50); }} }};
+                            }};
+                            
+                            grecaptcha.getResponse = function(widgetId) {{
+                                console.log('[Bot] grecaptcha.getResponse(' + widgetId + ') = token');
+                                return '{token}';
+                            }};
+                        }}
+
+                        // Magento/Form fallback: ensure g-recaptcha-response input is in form
+                        const forms = document.querySelectorAll('form');
+                        forms.forEach(form => {{
+                            let hiddenInput = form.querySelector('input[name="g-recaptcha-response"]');
+                            if (!hiddenInput) {{
+                                hiddenInput = document.createElement('input');
+                                hiddenInput.type = 'hidden';
+                                hiddenInput.name = 'g-recaptcha-response';
+                                form.appendChild(hiddenInput);
+                            }}
+                            hiddenInput.value = '{token}';
+                        }});
+
+                        // Trigger all stored callbacks in window.__bot_widget_ids directly
+                        if (window.__bot_widget_ids) {{
+                            Object.values(window.__bot_widget_ids).forEach(w => {{
+                                if (w && typeof w.callback === 'function') {{
+                                    try {{ w.callback('{token}'); }} catch(e) {{}}
+                                }}
+                            }});
                         }}
 
                         // 4. Recursively find and invoke callback functions in ___grecaptcha_cfg

@@ -154,6 +154,8 @@ export default function TasksPage() {
   const [sessions, setSessions] = useState<any[]>([]);
   const [filter, setFilter] = useState('');
   const [selectedTask, setSelectedTask] = useState<any>(null);
+  const [page, setPage] = useState(1);
+  const [totalTasks, setTotalTasks] = useState(0);
   const [userInputValue, setUserInputValue] = useState('');
   const [isSendingInput, setIsSendingInput] = useState(false);
 
@@ -176,11 +178,12 @@ export default function TasksPage() {
 
   const fetchTasks = useCallback(async () => {
     try {
-      const params = new URLSearchParams({ page: '1', page_size: '50' });
+      const params = new URLSearchParams({ page: String(page), page_size: '5' });
       if (filter) params.set('status', filter);
       const data = await api.get<any>(`/tasks?${params}`);
       const fetchedTasks = data.tasks || [];
       setTasks(fetchedTasks);
+      setTotalTasks(data.total || 0);
 
       // ── Check ALL tasks for waiting_user_input ─────────────────
       const waitingTask = fetchedTasks.find(
@@ -234,7 +237,7 @@ export default function TasksPage() {
     } finally {
       setLoading(false);
     }
-  }, [filter, selectedTask?.id]);
+  }, [filter, page, selectedTask?.id]);
 
   const fetchSessions = async () => {
     try {
@@ -247,6 +250,11 @@ export default function TasksPage() {
   useEffect(() => {
     fetchTasks();
     fetchSessions();
+  }, [filter, page]);
+
+  // Reset to page 1 on filter change
+  useEffect(() => {
+    setPage(1);
   }, [filter]);
 
   // ── Global polling — every 3 seconds, ALL tasks ──────────────
@@ -528,6 +536,29 @@ export default function TasksPage() {
                 </div>
               </div>
             ))}
+            
+            {/* Pagination Controls */}
+            {totalTasks > 5 && (
+              <div className="flex items-center justify-between pt-4 border-t border-surface-200 mt-4 bg-white p-4 rounded-xl shadow-sm">
+                <button
+                  onClick={() => setPage(p => Math.max(1, p - 1))}
+                  disabled={page === 1}
+                  className="px-4 py-2 border border-surface-200 rounded-lg text-sm font-medium hover:bg-surface-50 text-surface-700 disabled:opacity-50 disabled:hover:bg-transparent transition-colors"
+                >
+                  Previous
+                </button>
+                <span className="text-sm text-surface-600 font-medium">
+                  Page {page} of {Math.ceil(totalTasks / 5)} ({totalTasks} total tasks)
+                </span>
+                <button
+                  onClick={() => setPage(p => Math.min(Math.ceil(totalTasks / 5), p + 1))}
+                  disabled={page >= Math.ceil(totalTasks / 5)}
+                  className="px-4 py-2 border border-surface-200 rounded-lg text-sm font-medium hover:bg-surface-50 text-surface-700 disabled:opacity-50 disabled:hover:bg-transparent transition-colors"
+                >
+                  Next
+                </button>
+              </div>
+            )}
           </div>
         )}
 

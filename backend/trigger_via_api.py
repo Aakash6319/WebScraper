@@ -40,7 +40,7 @@ async def main():
     }
     
     payload = {
-        "prompt": "Go to https://portal.sealdynamics.com/IPFSitePages/Main.aspx, log in with user ID: 200178 and password: SeattleSD2023!, then search for part number 'dk120', and find its price.",
+        "prompt": "Go to https://pilotjohn.com/, log in with email: gorkem.genc@seattleav.com and password: 314Rgg*-314 , then search for part number '02-7813C0100' and find its price.",
         "priority": 1,
         "max_retries": 2,
         "timeout_seconds": 600

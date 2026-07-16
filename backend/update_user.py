@@ -45,7 +45,7 @@ async def main():
     for user in users:
         print(f"Updating credentials for: {user.email}...")
         user.deepseek_api_key_encrypted = encrypt_credential("sk-5c8c555bccfb4b9eb8b24649df516a89")
-        user.anticaptcha_api_key_encrypted = encrypt_credential("81823bd7a8f821102709de3601ed846e")
+        user.anticaptcha_api_key_encrypted = encrypt_credential("61169a7d23d8abc808c935f4ebc4baf8")
         user.capsolver_api_key_encrypted = encrypt_credential("CAP-F35972E69C6D5BF5C130A55A9FBD727989D73D4DA2E01770E252CC0714FC9495")
         user.webshare_proxy_username_encrypted = None
         user.webshare_proxy_password_encrypted = None

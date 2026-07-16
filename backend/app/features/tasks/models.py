@@ -86,7 +86,7 @@ class TaskDocument(Document):
             "created_at",
         ]
 
-    def dict_for_response(self) -> dict:
+    def dict_for_response(self, exclude_screenshots: bool = False) -> dict:
         return {
             "id": str(self.id),
             "user_id": self.user_id,
@@ -101,7 +101,7 @@ class TaskDocument(Document):
             "steps_executed": self.steps_executed,
             "extracted_data": self.extracted_data,
             "screenshots_count": len(self.screenshots),
-            "screenshots": self.screenshots,
+            "screenshots": [] if exclude_screenshots else self.screenshots,
             "error_message": self.error_message,
             "retry_count": self.retry_count,
             "captcha_detected": self.captcha_detected,

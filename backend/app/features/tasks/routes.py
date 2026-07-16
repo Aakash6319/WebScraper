@@ -39,7 +39,7 @@ async def create_task(
 @router.get("", response_model=TaskListResponse)
 async def list_tasks(
     page: int = 1,
-    page_size: int = 20,
+    page_size: int = 5,
     status: Optional[str] = None,
     session_id: Optional[str] = None,
     current_user: UserDocument = Depends(get_current_user),

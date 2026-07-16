@@ -116,7 +116,7 @@ class StealthManager:
         rng = random.Random(hashlib.sha256(seed.encode()).digest())
 
         # Select platform-appropriate fingerprints
-        platform_key = rng.choice(list(cls.PLATFORMS.keys()))
+        platform_key = "windows"
         platform = cls.PLATFORMS[platform_key]
 
         # User-agent matching the platform
@@ -924,8 +924,16 @@ class HumanBehavior:
         title = await page.title() or ""
         content = await page.content() or ""
 
+        is_cloudflare_challenge = (
+            "just a moment..." in title.lower() or
+            "cloudflare" in title.lower() or
+            "challenges.cloudflare.com" in content or
+            "cf-challenge" in content or
+            "challenge-form" in content
+        )
+
         if (
-            (status and status in (403, 503, 401, 502)) or
+            (status and status in (403, 503, 401, 502) and not is_cloudflare_challenge) or
             "forbidden" in title.lower() or
             "access denied" in title.lower() or
             "403 forbidden" in content.lower() or
