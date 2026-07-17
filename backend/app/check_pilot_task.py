@@ -6,7 +6,7 @@ from app.features.tasks.models import TaskDocument
 async def main():
     client = AsyncIOMotorClient("mongodb://mongodb:27017")
     await init_beanie(database=client.autowebagent, document_models=[TaskDocument])
-    t = await TaskDocument.get("6a58d73c84900e06cb157fae")
+    t = await TaskDocument.get("6a5933dfb4dafe1dd5008d7c")
     if t:
         print("PROMPT:", t.prompt)
         print("STATUS:", t.status)
@@ -14,12 +14,12 @@ async def main():
         print("CAPTCHA DETECTED:", t.captcha_detected)
         print("CAPTCHA SOLVED:", t.captcha_solved)
         print("EXTRACTED DATA:", t.extracted_data)
-        if hasattr(t, "steps"):
-            for s in t.steps:
-                print(f"- Step {s.step}: {s.action} - success={s.success} - error={s.error}")
-        elif hasattr(t, "execution_steps"):
-            for s in t.execution_steps:
-                print(f"- Step {s.get('step')}: {s.get('action')} - success={s.get('success')} - clicked={s.get('clicked') or s.get('typed') or s.get('url')}")
+        print("STEPS EXECUTED:")
+        if hasattr(t, "steps_executed") and t.steps_executed:
+            for i, s in enumerate(t.steps_executed):
+                print(f"[{i+1}] {s.get('action')}: {s.get('description')} (Value: {s.get('value')})")
+        else:
+            print("None")
     else:
         print("Task not found")
 

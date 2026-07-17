@@ -135,6 +135,46 @@ class AgentService:
             logger.debug(f"Cookie accept check error: {e}")
             return False
 
+    @staticmethod
+    async def _has_login_form_fields(page) -> bool:
+        """
+        Check if the current page has visible login/credential form fields
+        (email, username, or password inputs that are visible in the DOM).
+        Used to distinguish between popup-opening clicks and submit clicks.
+        """
+        try:
+            has_fields = await page.evaluate("""() => {
+                const inputs = document.querySelectorAll('input:not([type="hidden"])');
+                for (const input of inputs) {
+                    if (!input.offsetParent) continue;  // skip hidden/invisible inputs
+                    const type = (input.type || '').toLowerCase();
+                    const autocomplete = (input.getAttribute('autocomplete') || '').toLowerCase();
+                    const name = (input.name || '').toLowerCase();
+                    const placeholder = (input.placeholder || '').toLowerCase();
+                    const id = (input.id || '').toLowerCase();
+                    const ariaLabel = (input.getAttribute('aria-label') || '').toLowerCase();
+
+                    const isEmail = type === 'email' || autocomplete === 'email' ||
+                        autocomplete === 'username' ||
+                        name.includes('email') || name.includes('user') || name.includes('login') ||
+                        placeholder.includes('email') || placeholder.includes('user') ||
+                        id.includes('email') || id.includes('user') || id.includes('login') ||
+                        ariaLabel.includes('email') || ariaLabel.includes('user');
+                    const isPassword = type === 'password' ||
+                        autocomplete === 'current-password' || autocomplete === 'new-password' ||
+                        name.includes('pass') || name.includes('pwd') ||
+                        placeholder.includes('password') || placeholder.includes('pass') ||
+                        id.includes('password') || id.includes('pass') ||
+                        ariaLabel.includes('password');
+
+                    if (isEmail || isPassword) return true;
+                }
+                return false;
+            }""")
+            return bool(has_fields)
+        except Exception:
+            return False
+
     @classmethod
     async def execute_task(cls, task_id: str, user_id: str) -> None:
         """
@@ -348,6 +388,8 @@ class AgentService:
             _wait_scroll_streak: int = 0        # consecutive wait/scroll count
             _was_on_oauth: bool = False          # track OAuth domain transitions
             _oauth_return_time: float = 0.0       # timestamp when we returned from OAuth (block navigate for 45s)
+            _credentials_typed: bool = False      # track if email/password type actions happened before submit
+            _had_form_fields_before_click: bool = False  # snapshot before login popup clicks
 
             while step_idx < max_steps and not task_finished_successfully:
                 # 0a. ── Post-OAuth settle wait ──────────────────────────────
@@ -803,13 +845,23 @@ class AgentService:
                         description = step["description"]
                         _recent_nav_urls.clear()
 
-                # Strategy 2: Fingerprint loop — action+url+description combo repeated 3+ times
+                # Strategy 2: Fingerprint loop — action+description combo repeated 3+ times
+                # IMPORTANT: Filter out synthetic 'detection' steps (success=False) injected
+                # by post-submit failure detection. Those break consecutive pattern matching
+                # and prevent the loop detector from catching real action loops.
                 if len(task.steps_executed) >= 3:
                     def _make_fingerprint(s: dict) -> str:
                         return f"{s.get('action','')}|{s.get('description','').lower()[:60]}"
+                    def _is_real_action(s: dict) -> bool:
+                        """Filter out synthetic failure-injected detection steps."""
+                        if s.get("action") == "detection" and s.get("success") is False:
+                            return False
+                        return True
                     current_fp = f"{action}|{description.lower()[:60]}"
-                    recent_fps = [_make_fingerprint(s) for s in task.steps_executed[-3:]]
-                    if all(fp == current_fp for fp in recent_fps):
+                    # Only consider REAL actions (not synthetic detection injects) for fingerprint
+                    real_history = [s for s in task.steps_executed if _is_real_action(s)]
+                    recent_fps = [_make_fingerprint(s) for s in real_history[-5:]]  # check last 5 real steps
+                    if len(recent_fps) >= 3 and all(fp == current_fp for fp in recent_fps[-3:]):
                         logger.warning(f"🔁 Fingerprint loop detected! Repeated 3x: '{current_fp}'. Forcing scroll to break loop.")
                         step = {
                             "action": "scroll",
@@ -923,6 +975,11 @@ class AgentService:
                             except Exception as pre_cap_ex:
                                 logger.warning(f"⚠️ Pre-submit CAPTCHA check failed: {pre_cap_ex}")
 
+                        # ── Snapshot form state before auth clicks ─────────
+                        # Used to detect popup-opening clicks vs form submit clicks
+                        if action == "click" and is_submit_click:
+                            _had_form_fields_before_click = await cls._has_login_form_fields(page)
+
                         # Execute the action
                         result = await cls._execute_action(
                             page=page,
@@ -941,6 +998,14 @@ class AgentService:
                         success = True
                         if "error" in step_result:
                             del step_result["error"]
+
+                        # ── Track if credentials were typed ──────────────
+                        if action == "type" and value:
+                            lower_val = (value or "").lower()
+                            lower_desc = description.lower()
+                            if any(kw in lower_val or kw in lower_desc for kw in ["@", "email", "password", "username", "gorkem", "user", "login"]):
+                                _credentials_typed = True
+                                logger.info("📝 Credential field filled — tracking for post-submit validation")
 
                     except Exception as e:
                         logger.error(f"  ❌ Step {step_idx + 1} attempt {attempt + 1} failed: {e}")
@@ -961,6 +1026,12 @@ class AgentService:
                 # wrong page (homepage or login page instead of account/dashboard).
                 # Magento and similar sites redirect away from the reCAPTCHA error page
                 # before our main-loop check can catch it, so we detect here instead.
+                #
+                # CRITICAL: Distinguish between 3 types of "Sign In" clicks:
+                #   A) Header nav link → opens popup/modal with login form
+                #   B) Form submit button → actually submits credentials
+                #   C) Navigation link → redirects to /account/login page
+                # Only B and C should trigger failure detection. A should let LLM see the form.
                 if action == "click":
                     lower_action_desc = description.lower()
                     is_auth_click = any(
@@ -979,7 +1050,6 @@ class AgentService:
                             if any(kw in post_url_lower for kw in ["/process", "/check", "/post", "/authenticate", "/submit"]):
                                 logger.info(f"⏳ On form processing URL: {post_url}. Waiting up to 10s for redirect to settle...")
                                 try:
-                                    # Wait for URL to change away from processing URL
                                     await page.wait_for_function(
                                         """
                                         (processing_url) => window.location.href !== processing_url
@@ -994,7 +1064,6 @@ class AgentService:
                                     logger.warning("Timeout waiting for processing URL to redirect.")
                             
                             # ── SKIP validation for OAuth/SSO external domains ──
-                            # These domains handle auth externally — "login" in their URL is NORMAL
                             _oauth_domains = [
                                 "customerlogin.", "login.microsoft", "login.live",
                                 "microsoftonline", "azure.com", "oauth", "okta.com",
@@ -1004,8 +1073,28 @@ class AgentService:
                             _is_oauth_domain = any(d in post_url_lower for d in _oauth_domains)
                             if _is_oauth_domain:
                                 logger.info(f"🔗 On OAuth/SSO domain ({post_url[:80]}...) — skipping post-submit login-failure check")
-                                # Don't run the validation below — proceed normally
                             else:
+                                # ── POPUP DETECTION: Check if login form fields appeared AFTER click ──
+                                # If the page had NO form fields before but now HAS them, this was a
+                                # popup-opening click (type A), NOT a failed submit. Don't inject failure.
+                                if not _had_form_fields_before_click:
+                                    await asyncio.sleep(1.5)  # let popup/modal fully render
+                                    form_fields_now = await cls._has_login_form_fields(page)
+                                    if form_fields_now:
+                                        logger.success(
+                                            "🔓 LOGIN POPUP/MODAL DETECTED — form fields appeared after clicking Sign In. "
+                                            "This was a popup-opening click (NOT a submit). Letting LLM see the form fields."
+                                        )
+                                        # Reset credentials tracking — this is a fresh login form
+                                        _credentials_typed = False
+                                        # Do NOT inject failure — proceed normally so LLM sees the form
+                                        task.steps_executed.append(step_result)
+                                        task.screenshots = screenshots
+                                        await task.save()
+                                        step_idx += 1
+                                        await StealthManager.random_delay(500, 1500)
+                                        continue  # go to next loop — LLM will now see form fields in DOM
+
                                 post_text = await page.evaluate(
                                     "() => document.body ? document.body.innerText.substring(0, 2000).toLowerCase() : ''"
                                 )
@@ -1051,30 +1140,47 @@ class AgentService:
                                     logger.warning(
                                         f"🔴 POST-SUBMIT FAILURE DETECTED: "
                                         f"immediate_error={immediate_error}, still_on_login={still_on_login}, on_homepage={on_homepage}, "
-                                        f"has_recaptcha_error={has_recaptcha_error}, shows_login_prompts={shows_login_prompts}"
+                                        f"has_recaptcha_error={has_recaptcha_error}, shows_login_prompts={shows_login_prompts}, "
+                                        f"credentials_typed={_credentials_typed}"
                                     )
-                                    # Inject a synthetic failure step so the LLM knows login failed
-                                    failure_note = {
-                                        "step": step_idx + 2,  # next logical step
-                                        "action": "detection",
-                                        "description": (
+
+                                    # ── SMART FAILURE MESSAGE: distinguish form-empty vs CAPTCHA-rejected ──
+                                    if _credentials_typed:
+                                        # Credentials WERE typed — login genuinely failed (reCAPTCHA or bad password)
+                                        failure_desc = (
                                             "⚠️ LOGIN FAILED — reCAPTCHA token was rejected or login was unsuccessful. "
                                             "Current page URL is still a login/home page, not an account dashboard. "
                                             "You MUST go back to the login page, re-fill credentials, solve CAPTCHA "
                                             "freshly, and click Sign In again. Do NOT navigate to search for products."
-                                        ),
+                                        )
+                                        failure_err = "Login failed: reCAPTCHA token rejected by server or invalid credentials."
+                                        _credentials_typed = False  # reset for retry
+                                    else:
+                                        # Credentials NOT typed — form was never filled before submit
+                                        failure_desc = (
+                                            "⚠️ LOGIN FORM SUBMIT FAILED — credentials (email/password) were NEVER typed "
+                                            "into the form before clicking Sign In/Submit. The form was empty. "
+                                            "You MUST first TYPE the email into the email field, then TYPE the password "
+                                            "into the password field, and ONLY THEN click the Sign In/Submit button. "
+                                            "Do NOT click Sign In without filling the form first."
+                                        )
+                                        failure_err = "Login failed: form was submitted without filling credentials (email/password never typed)."
+
+                                    failure_note = {
+                                        "step": step_idx + 2,
+                                        "action": "detection",
+                                        "description": failure_desc,
                                         "success": False,
-                                        "error": "Login failed: reCAPTCHA token rejected by server or invalid credentials.",
+                                        "error": failure_err,
                                         "timestamp": datetime.now(timezone.utc).isoformat(),
                                     }
-                                    # Append the original step + the failure note
                                     task.steps_executed.append(step_result)
                                     task.steps_executed.append(failure_note)
                                     task.screenshots = screenshots
                                     await task.save()
-                                    step_idx += 2  # skip ahead to account for both steps
+                                    step_idx += 2
                                     await StealthManager.random_delay(1000, 2000)
-                                    continue  # go to next loop iteration — LLM will see the failure
+                                    continue
 
                         except Exception as post_check_ex:
                             logger.debug(f"Post-submit validation check failed: {post_check_ex}")

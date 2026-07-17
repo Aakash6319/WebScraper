@@ -158,6 +158,7 @@ export default function TasksPage() {
   const [totalTasks, setTotalTasks] = useState(0);
   const [userInputValue, setUserInputValue] = useState('');
   const [isSendingInput, setIsSendingInput] = useState(false);
+  const [zoomedImage, setZoomedImage] = useState<string | null>(null);
 
   const screenshotContainerRef = useRef<HTMLDivElement>(null);
 
@@ -646,11 +647,12 @@ export default function TasksPage() {
                       className="flex gap-4 overflow-x-auto scrollbar-thin scrollbar-thumb-surface-700 snap-x scroll-smooth"
                     >
                       {selectedTask.screenshots.map((s_b64: string, idx: number) => (
-                        <div key={idx} className="snap-center flex-shrink-0 w-full md:w-[75%] aspect-video relative bg-black flex items-center justify-center border border-surface-800 rounded-lg overflow-hidden">
+                        <div key={idx} className="snap-center flex-shrink-0 w-full aspect-video relative bg-black flex items-center justify-center border border-surface-800 rounded-lg overflow-hidden">
                           <img
                             src={`data:image/png;base64,${s_b64}`}
                             alt={`Step ${idx + 1}`}
-                            className="max-h-[450px] max-w-full object-contain"
+                            className="max-h-[450px] max-w-full object-contain cursor-zoom-in hover:opacity-90 transition-opacity"
+                            onClick={() => setZoomedImage(s_b64)}
                           />
                           <span className="absolute bottom-2 left-2 px-2 py-0.5 bg-black/70 text-white rounded text-[10px] font-bold">
                             Screenshot {idx + 1}
@@ -739,6 +741,28 @@ export default function TasksPage() {
           </div>
         )}
       </div>
+      {zoomedImage && (
+        <div 
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/90 backdrop-blur-sm transition-all duration-300 animate-in fade-in cursor-zoom-out"
+          onClick={() => setZoomedImage(null)}
+        >
+          <button 
+            className="absolute top-4 right-4 text-white hover:text-gray-300 bg-white/10 hover:bg-white/20 p-2 rounded-full transition-all focus:outline-none"
+            onClick={() => setZoomedImage(null)}
+          >
+            <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+          <div className="relative max-w-[95vw] max-h-[90vh] overflow-hidden rounded-xl border border-surface-800 shadow-2xl scale-in duration-200" onClick={(e) => e.stopPropagation()}>
+            <img 
+              src={`data:image/png;base64,${zoomedImage}`} 
+              alt="Zoomed Screenshot" 
+              className="max-w-full max-h-[90vh] object-contain rounded-lg"
+            />
+          </div>
+        </div>
+      )}
     </>
   );
 }

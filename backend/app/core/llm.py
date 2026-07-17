@@ -207,6 +207,18 @@ UNIVERSAL RULES (apply to ALL websites):
 • Never leave a required field empty before clicking Next/Submit.
 • For dropdowns (select_option), use the exact option text value.
 
+[LOGIN POPUPS & MODALS — CRITICAL]
+• Many websites use popup/modals for login — clicking a header "Sign In" link OPENS a popup form.
+• If you are trying to fill the login form (type email/password or click submit) but the email or password input fields are NOT present in the current DOM tree (meaning the popup closed or did not open successfully), DO NOT try to type or submit. You MUST first click the "Sign In" or login header button again to reopen the popup.
+• After clicking a Sign In/Login LINK (not a submit button), carefully check the DOM elements:
+  - If NEW input fields appeared that were NOT in the previous DOM → those are the login form fields!
+  - Look for inputs with type="email", type="password", autocomplete="username"/"email"/"current-password"
+  - IMMEDIATELY type the email into the email field, then type the password into the password field.
+  - NEVER click the same Sign In link again if input fields are now visible — that would close the popup!
+• Pattern: click Sign In header link → WAIT for popup → TYPE email → TYPE password → click submit button.
+• If you see "FORM NOT FILLED" in history, it means you clicked submit without typing credentials first.
+  Go back, look for the email/password fields, and TYPE them before clicking any submit button.
+
 [NAVIGATION & SEARCH]
 • Always use authenticated/logged-in URLs when you know the user is logged in.
 • If a search field is present, type the query and press Enter or click the search button.
@@ -248,23 +260,29 @@ UNIVERSAL RULES (apply to ALL websites):
   - For an input search field: use `input[placeholder*="Search"]` or `input[name*="Search"]`
 • If a robust selector cannot be built, leave the selector empty to fall back to description-based DOM index resolution.
 
-	[LOGIN & AUTHENTICATION — SMART DETECTION]
-	• Login buttons come in many forms: `<a>Sign In</a>`, `<button>Sign In / Register</button>`, `<span>Login</span>` — click whichever is in the HEADER/TOP-BAR area, NOT the one in page content/hero banners.
-	• If clicking a login button redirects you to a DIFFERENT domain (e.g., `login.site.com`, `auth.site.com`, `*.microsoft.com`, `*.azure.com`) → this is an OAuth/SSO flow. Do NOT panic. The current page IS the login page — find email/password fields there and fill them.
-	• Multi-step login (common with Microsoft/Azure): enter email → click "Next" → enter password → click "Sign In". Handle each step sequentially.
-	• If 2FA (two-factor authentication) is required: click "Email code" or "Send code", then wait for user input (the code will be provided). After entering the code, click "Verify".
-	• After completing the OAuth flow (clicking "Yes" or "Stay signed in") → DO NOT manually navigate anywhere! The OAuth provider will AUTOMATICALLY redirect you back to the original site. Just WAIT (use wait action for 5-8 seconds) for the redirect to complete. If you manually navigate, you will LOSE the login session.
-	• When you land back on the original site after OAuth, the page header may still show "Sign In" for a few seconds while the session initializes. DO NOT click "Sign In" again! Just WAIT another 3-5 seconds — the session will settle and the header will update to show the account name. Clicking "Sign In" during this window will DESTROY the session.
-	• After login, if redirected back to the original site, a COOKIE consent popup may appear. Dismiss it before doing anything else.
-	• If the login form has a "Sign In" button that looks like it submits the form — it may be the submit button, not a navigation link. Distinguish between login-page-submit-buttons and navigation-login-links.
-	• After you click "Sign In", "Login", "Submit" or similar submit buttons, the page may reload. ALWAYS check whether login ACTUALLY succeeded:
-	    - If the URL still contains "login", "signin", or "sign_in" → login FAILED, you are still on the login page.
-	    - If the URL is the site homepage (just "/" with no "account", "dashboard", "my-account", "profile" in the path) → login FAILED, you were redirected back.
-	    - If the PAGE TEXT contains "reCAPTCHA verification failed", "Something went wrong with reCAPTCHA", "Invalid login or password", "Incorrect CAPTCHA", "The CAPTCHA verification failed", or similar error messages → login FAILED.
-	    - If the PAGE TEXT contains "Welcome", "Sign In", "Login", "Create an Account" and you just tried to log in → you are NOT logged in, login FAILED.
-	• NEVER assume login succeeded just because the page loaded or changed. Verify by checking the URL and page text for signs of being logged in (account name, "My Account", "Log Out", dashboard elements).
-	• If login FAILED: go back to the login page, re-fill credentials, re-solve CAPTCHA, and try again. Do NOT navigate away to search for products or perform post-login tasks.
-	• If you see "reCAPTCHA verification failed" in the page text → the CAPTCHA token was rejected by the server. You MUST re-solve the CAPTCHA and submit again. Do NOT ignore this and move on.
+		[LOGIN & AUTHENTICATION — SMART DETECTION]
+		• Login buttons come in many forms: `<a>Sign In</a>`, `<button>Sign In / Register</button>`, `<span>Login</span>` — click whichever is in the HEADER/TOP-BAR area, NOT the one in page content/hero banners.
+		• TWO TYPES of "Sign In" clicks:
+		    1) HEADER NAV LINK (opens popup/modal or navigates to login page) — after clicking, look for email/password INPUT FIELDS that appeared. The NEXT action MUST be to TYPE credentials into those fields.
+		    2) FORM SUBMIT BUTTON (submits filled credentials) — only click AFTER you have already typed email AND password.
+		• If you click "Sign In" and the DOM now shows input fields (type="email", type="password", autocomplete="username") → those are the login form! NEVER click the same "Sign In" link again — TYPE the credentials instead!
+		• If history shows "FORM NOT FILLED — credentials were never typed" → you clicked submit without typing. Go back, find the form fields, TYPE email first, then TYPE password, then click submit.
+		• If clicking a login button redirects you to a DIFFERENT domain (e.g., `login.site.com`, `auth.site.com`, `*.microsoft.com`, `*.azure.com`) → this is an OAuth/SSO flow. Do NOT panic. The current page IS the login page — find email/password fields there and fill them.
+		• Multi-step login (common with Microsoft/Azure): enter email → click "Next" → enter password → click "Sign In". Handle each step sequentially.
+		• If 2FA (two-factor authentication) is required: click "Email code" or "Send code", then wait for user input (the code will be provided). After entering the code, click "Verify".
+		• After completing the OAuth flow (clicking "Yes" or "Stay signed in") → DO NOT manually navigate anywhere! The OAuth provider will AUTOMATICALLY redirect you back to the original site. Just WAIT (use wait action for 5-8 seconds) for the redirect to complete. If you manually navigate, you will LOSE the login session.
+		• When you land back on the original site after OAuth, the page header may still show "Sign In" for a few seconds while the session initializes. DO NOT click "Sign In" again! Just WAIT another 3-5 seconds — the session will settle and the header will update to show the account name. Clicking "Sign In" during this window will DESTROY the session.
+		• After login, if redirected back to the original site, a COOKIE consent popup may appear. Dismiss it before doing anything else.
+		• If the login form has a "Sign In" button that looks like it submits the form — it may be the submit button, not a navigation link. Distinguish between login-page-submit-buttons and navigation-login-links.
+		• After you click "Sign In", "Login", "Submit" or similar submit buttons, the page may reload. ALWAYS check whether login ACTUALLY succeeded:
+		    - If the URL still contains "login", "signin", or "sign_in" → login FAILED, you are still on the login page.
+		    - If the URL is the site homepage (just "/" with no "account", "dashboard", "my-account", "profile" in the path) → login FAILED, you were redirected back.
+		    - If the PAGE TEXT contains "reCAPTCHA verification failed", "Something went wrong with reCAPTCHA", "Invalid login or password", "Incorrect CAPTCHA", "The CAPTCHA verification failed", or similar error messages → login FAILED.
+		    - If the PAGE TEXT contains "Welcome", "Sign In", "Login", "Create an Account" and you just tried to log in → you are NOT logged in, login FAILED.
+		• NEVER assume login succeeded just because the page loaded or changed. Verify by checking the URL and page text for signs of being logged in (account name, "My Account", "Log Out", dashboard elements).
+		• If login FAILED: go back to the login page, re-fill credentials, re-solve CAPTCHA, and try again. Do NOT navigate away to search for products or perform post-login tasks.
+		• If you see "reCAPTCHA verification failed" in the page text → the CAPTCHA token was rejected by the server. You MUST re-solve the CAPTCHA and submit again. Do NOT ignore this and move on.
+		• If you see "FORM NOT FILLED — credentials were never typed" in history → you clicked submit with an empty form. Go back, TYPE the email and password into the form fields, then submit.
 	
 	━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 	IMPORTANT:
